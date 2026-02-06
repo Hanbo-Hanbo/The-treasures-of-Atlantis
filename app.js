@@ -1,9 +1,7 @@
 const express = require("express");
 const app = express();
-const http = require("http");
-const server = http.createServer(app);
-const { Server } = require("socket.io");
-const io = new Server(server);
+const server = require("http").createServer(app);
+const io = require("socket.io")(server);
 
 app.use(express.static("public"));
 
@@ -28,7 +26,7 @@ io.on("connection", (socket) => {
         socket.broadcast.emit("drawing", data);
         
         treasures.forEach(t => {
-            if (!t.found && Math.hypot(data.xpos - t.x, data.ypos - t.y) < 0.06) {
+            if (!t.found && Math.hypot(data.xpos - t.x, data.ypos - t.y) < 0.07) {
                 t.found = true;
                 io.emit("status-update", { treasures, stars });
             }
@@ -46,4 +44,4 @@ io.on("connection", (socket) => {
     });
 });
 
-server.listen(process.env.PORT || 3000, () => console.log("Server running"));
+server.listen(process.env.PORT || 3000);

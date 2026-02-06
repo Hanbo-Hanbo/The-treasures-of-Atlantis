@@ -1,7 +1,6 @@
 {
-  "name": "treasure-hunt",
+  "name": "treasure-hunt-10m",
   "version": "1.0.0",
-  "description": "Networked Treasure Hunt",
   "main": "app.js",
   "scripts": {
     "start": "node app.js"
