@@ -1,41 +1,41 @@
 let socket;
-let myPos = { x: 0.5, y: 0.5 }; // Shared state [cite: 17]
+let myPos = { x: 0.5, y: 0.5 }; // Normalized position (0.0 to 1.0)
 let activeTreasures = [];
 let stars = 0;
 let heading = 0;
-let interferenceEndTime = 0;
+let interferenceTimer = 0;
 let myColor;
-let stepThreshold = 8; // Lowered to be more sensitive to movement
+let stepThreshold = 4; // High sensitivity for 5sqm space
+let currentAccel = 0;
 let lastAccel = 0;
 let drawingHistory = [];
 let mapImg;
+let flashAlpha = 0; // Visual vibration feedback
 
 function preload() {
     mapImg = loadImage('map.jpg');
 }
 
 function setup() {
-    socket = io(); // Creates Socket.IO client connection [cite: 15, 16]
+    socket = io(); 
     let canvas = createCanvas(windowWidth, windowHeight);
-    canvas.parent("sketch-container"); // Attaches canvas to HTML element [cite: 35, 36]
-    
-    // Give user a random brush color [cite: 70, 71]
+    canvas.parent("sketch-container"); 
     myColor = color(random(255), random(255), random(255));
 
-    // Permission button for iOS
-    let btn = createButton("ENTER 10m² TREASURE FIELD");
+    let btn = createButton("START 5m² SEARCH");
     btn.style('padding', '20px');
     btn.center();
     btn.mousePressed(() => {
         if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-            Promise.all([
-                DeviceOrientationEvent.requestPermission(),
-                DeviceMotionEvent.requestPermission()
-            ]).then(results => {
-                if (results.every(res => res === 'granted')) {
+            DeviceOrientationEvent.requestPermission().then(reg => {
+                if (reg === 'granted') {
                     window.addEventListener('deviceorientation', e => {
                         heading = e.webkitCompassHeading || e.alpha;
                     }, true);
+                }
+            });
+            DeviceMotionEvent.requestPermission().then(reg => {
+                if (reg === 'granted') {
                     window.addEventListener('devicemotion', handleMotion, true);
                     btn.hide();
                 }
@@ -43,136 +43,121 @@ function setup() {
         } else { btn.hide(); }
     });
 
-    // Receive data from server [cite: 146, 150]
     socket.on("status-update", data => {
+        // Visual flash if a new treasure is found
         if (activeTreasures.length > 0 && data.treasures.filter(t => t.found).length > activeTreasures.filter(t => t.found).length) {
-            triggerVibration("treasure");
+            flashAlpha = 200; 
         }
         activeTreasures = data.treasures;
         stars = data.stars;
     });
     
     socket.on("history", data => { drawingHistory = data; });
-    
     socket.on("bomb-hit", () => { 
-        interferenceEndTime = millis() + 5000; 
-        triggerVibration("bomb");
+        interferenceTimer = millis() + 5000; 
+        flashAlpha = 255; // Red flash for bomb
     });
 }
 
-// Movement only triggers when a physical "step" (acceleration) is detected
 function handleMotion(event) {
-    if (millis() < interferenceEndTime) return;
-    
+    if (millis() < interferenceTimer) return;
     let acc = event.accelerationIncludingGravity;
-    let totalAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    if (!acc) return;
     
-    // Check if acceleration change exceeds the threshold (detects a step)
-    if (totalAccel - lastAccel > stepThreshold) {
-        let stepSize = 0.02; // Movement speed
-        
-        // Update position based on compass heading
+    currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    
+    // Step detection logic
+    if (abs(currentAccel - lastAccel) > stepThreshold) {
+        let stepSize = 0.025; // Speed adjusted for smaller 5sqm space
         myPos.x += cos(radians(heading - 90)) * stepSize;
         myPos.y += sin(radians(heading - 90)) * stepSize;
         
-        // Keep within bounds
         myPos.x = constrain(myPos.x, 0, 1);
         myPos.y = constrain(myPos.y, 0, 1);
         
-        emitData(); // Send drawing data to server [cite: 98, 99, 103]
+        // Sync position to server [cite: 105, 108]
+        socket.emit("drawing", {
+            xpos: myPos.x, ypos: myPos.y,
+            userR: red(myColor), userG: green(myColor), userB: blue(myColor)
+        });
     }
-    lastAccel = totalAccel;
+    lastAccel = currentAccel;
 }
 
 function draw() {
-    image(mapImg, 0, 0, width, height); 
-    let isInterfered = millis() < interferenceEndTime;
+    image(mapImg, 0, 0, width, height); // Proportional background [cite: 178]
+    let isInterfered = millis() < interferenceTimer;
 
-    // Draw previous drawing events from history [cite: 152, 153, 155]
+    // Draw history trails (proportional to window size) [cite: 152-155]
     for (let h of drawingHistory) {
-        fill(h.userR, h.userG, h.userB, 60);
+        fill(h.userR, h.userG, h.userB, 50);
         noStroke();
-        circle(h.xpos * width, h.ypos * height, 8); // Converts normalized back to local [cite: 123, 124]
+        circle(h.xpos * width, h.ypos * height, 8);
     }
 
     drawCompassUI(isInterfered);
 
-    // Draw player sphere
+    // Draw player (proportional to window size) [cite: 123-124]
     fill(myColor);
     stroke(255);
     strokeWeight(3);
     circle(myPos.x * width, myPos.y * height, 25);
-}
 
-function emitData() {
-    // Sends "drawing" event with normalized coordinates [cite: 105, 108, 109, 110]
-    socket.emit("drawing", {
-        xpos: myPos.x,
-        ypos: myPos.y,
-        userR: red(myColor),
-        userG: green(myColor),
-        userB: blue(myColor)
-    });
-}
+    // Visual vibration effect
+    if (flashAlpha > 0) {
+        fill(255, 0, 0, flashAlpha);
+        rect(0, 0, width, height);
+        flashAlpha -= 10; 
+    }
 
-function triggerVibration(type) {
-    if (!("vibrate" in navigator)) return;
-    if (type === "treasure") navigator.vibrate(500);
-    else if (type === "bomb") navigator.vibrate([100, 50, 100, 50, 100]);
-    else if (type === "near") navigator.vibrate(50);
+    // Debug sensor data
+    fill(255);
+    textSize(10);
+    textAlign(LEFT);
+    text("Sensor: " + nf(currentAccel, 1, 2), 10, height - 10);
 }
 
 function drawCompassUI(isInterfered) {
     let closestT = null;
     let minDist = Infinity;
-    
-    // Find closest unfound treasure
     activeTreasures.filter(t => !t.found).forEach(t => {
         let d = dist(myPos.x, myPos.y, t.x, t.y);
         if (d < minDist) { minDist = d; closestT = t; }
     });
 
-    if (closestT && minDist < 0.1 && frameCount % 30 === 0) triggerVibration("near");
-
     push();
     translate(width / 2, height - 150);
     let targetAngle = closestT ? atan2(closestT.y - myPos.y, closestT.x - myPos.x) : 0;
-    
-    // Rotate crosshair based on compass heading
     rotate(isInterfered ? random(TWO_PI) : (targetAngle - radians(heading) + PI/2));
     
-    // Draw Crosshair Compass
+    // Crosshair Compass
     strokeWeight(4);
-    let armLen = 60;
     stroke(200, 150);
-    line(0, 0, 0, armLen);    // Back
-    line(0, 0, -armLen, 0);   // Left
-    line(0, 0, armLen, 0);    // Right
+    line(0, -50, 0, 50); 
+    line(-50, 0, 50, 0);
     stroke(isInterfered ? 100 : color(255, 0, 0)); 
-    line(0, 0, 0, -armLen);   // Red Front (Points to Target)
-    noStroke();
-    fill(isInterfered ? 100 : color(255, 0, 0));
-    circle(0, 0, 10);
+    line(0, 0, 0, -50); // Red tip points to treasure
     pop();
 
-    // UI Panel
-    fill(0, 150);
+    // English UI Text
+    fill(0, 180);
     rectMode(CENTER);
-    rect(width/2, 65, 220, 45, 10);
+    rect(width/2, 60, 220, 40, 10);
     fill(255);
     textAlign(CENTER);
     textSize(20);
-    text(`⭐ Score: ${stars}`, width / 2, 72);
+    text(`⭐ SCORE: ${stars}`, width / 2, 68);
     
     if (closestT) {
-        fill(0, 150);
-        rect(width/2, height - 75, 250, 40, 10);
+        fill(0, 180);
+        rect(width/2, height - 85, 240, 40, 10);
         fill(255);
-        text(`Target: ${nf(minDist * 3.16, 1, 2)} m`, width / 2, height - 68);
+        // Mapping to 5sqm: distance ratio * 2.24m
+        text(`TARGET: ${nf(minDist * 2.24, 1, 2)}m`, width / 2, height - 78);
     }
     
     if (isInterfered) {
         fill(255, 0, 0);
-        text("⚠️ SIGNAL LOST", width / 2, height / 2);
+        text("⚠️ SIGNAL INTERFERENCE", width / 2, height / 2);
     }
 }
