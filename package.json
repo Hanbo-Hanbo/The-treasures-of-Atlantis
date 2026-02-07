@@ -1,5 +1,5 @@
 {
-  "name": "tactical-search-5stars",
+  "name": "tactical-search-final",
   "version": "1.0.0",
   "main": "app.js",
   "scripts": { "start": "node app.js" },

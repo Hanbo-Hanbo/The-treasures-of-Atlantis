@@ -1,19 +1,20 @@
 let socket;
 let myPos = { x: 0.5, y: 0.5 };
-let tempBase = { x: 0.5, y: 0.5 };
 let treasures = [];
 let bases = [];
+let leaderboard = [];
 let myColor;
 let mapImg;
 let heading = 0;
 let timeLeft = 300;
 
 // 状态控制
-let gameState = 0; 
+let gameState = 0; // 0:授权, 1:点击地图即开始, 3:正式游戏
 let lastMoveTime = -2000;
+let refreshCooldown = 2000;
 let stepThreshold = 12.0; 
 let lastAccel = 0;
-let confirmBtn;
+let currentAccel = 0;
 
 const REAL_SPACE_SIZE = 4.47; // 20平米映射
 
@@ -24,12 +25,11 @@ function setup() {
     createCanvas(windowWidth, windowHeight).parent("sketch-container");
     myColor = color(random(255), random(255), random(255));
 
-    // 步骤 1：开始按钮
-    let startBtn = createButton("STEP 1: START SETUP");
-    startBtn.center();
-    startBtn.style('padding', '20px');
-    startBtn.style('z-index', '100');
-    startBtn.mousePressed(() => {
+    // 步骤 1：授权
+    let authBtn = createButton("STEP 1: ENABLE SENSORS");
+    authBtn.center();
+    authBtn.style('padding', '20px');
+    authBtn.mousePressed(() => {
         if (typeof DeviceOrientationEvent.requestPermission === 'function') {
             Promise.all([
                 DeviceOrientationEvent.requestPermission(),
@@ -38,62 +38,51 @@ function setup() {
                 if (res.every(r => r === 'granted')) {
                     window.addEventListener('deviceorientation', e => heading = e.webkitCompassHeading || e.alpha, true);
                     window.addEventListener('devicemotion', handleMotion, true);
-                    gameState = 1; startBtn.hide();
+                    gameState = 1; authBtn.hide();
                 }
             });
-        } else { gameState = 1; startBtn.hide(); }
+        } else { gameState = 1; authBtn.hide(); }
     });
 
     socket.on("init-game", d => { treasures = d.treasures; bases = d.bases; timeLeft = d.gameTime; });
     socket.on("update-treasures", d => treasures = d);
     socket.on("update-bases", d => bases = d);
+    socket.on("update-leaderboard", d => leaderboard = d);
     socket.on("timer-update", t => timeLeft = t);
 }
 
 function mousePressed() {
-    // 步骤 2：在地图任意位置自由点击以设置临时点
-    if (gameState === 1 || gameState === 2) {
-        tempBase.x = mouseX / width;
-        tempBase.y = mouseY / height;
-        myPos.x = tempBase.x; 
-        myPos.y = tempBase.y;
-        gameState = 2; // 进入待确认状态
-        
-        // 如果确认按钮还没出现，就创建一个
-        if (!confirmBtn) {
-            confirmBtn = createButton("STEP 3: CONFIRM BASE");
-            confirmBtn.style('padding', '15px');
-            confirmBtn.style('background', '#00FFB4');
-            confirmBtn.position(width/2 - 80, height - 120);
-            confirmBtn.mousePressed(finalizeBase);
-        }
+    // 步骤 2：点击地图任意位置即开始
+    if (gameState === 1) {
+        myPos.x = mouseX / width;
+        myPos.y = mouseY / height;
+        socket.emit("set-base", { 
+            x: myPos.x, y: myPos.y, 
+            color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
+        });
+        gameState = 3;
+        return;
     } 
-    // 正式游戏时的手动刷新逻辑
-    else if (gameState === 3) {
+    // 刷新球手动点击
+    if (gameState === 3) {
         let d = dist(mouseX, mouseY, width - 60, height - 60);
         if (d < 45) triggerUpdate();
     }
-}
-
-function finalizeBase() {
-    socket.emit("set-base", { x: tempBase.x, y: tempBase.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
-    gameState = 3;
-    confirmBtn.hide();
 }
 
 function handleMotion(event) {
     if (gameState !== 3) return;
     let acc = event.accelerationIncludingGravity;
     if (!acc) return;
-    let totalAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-    if (abs(totalAccel - lastAccel) > stepThreshold) triggerUpdate();
-    lastAccel = totalAccel;
+    currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    if (abs(currentAccel - lastAccel) > stepThreshold) triggerUpdate();
+    lastAccel = currentAccel;
 }
 
 function triggerUpdate() {
-    if (millis() - lastMoveTime < 500) return; 
+    if (millis() - lastMoveTime < 500) return;
     lastMoveTime = millis();
-    let stepSize = 0.04; 
+    let stepSize = 0.05; 
     myPos.x += cos(radians(heading - 90)) * stepSize;
     myPos.y += sin(radians(heading - 90)) * stepSize;
     myPos.x = constrain(myPos.x, 0, 1);
@@ -107,25 +96,8 @@ function triggerUpdate() {
 function draw() {
     image(mapImg, 0, 0, width, height);
     
-    if (gameState === 1) {
-        drawOverlay("STEP 2: TAP ANYWHERE ON MAP");
-    } 
-    else if (gameState === 2) {
-        drawOverlay("CLICK AGAIN TO MOVE, OR CONFIRM");
-        // 预览大本营位置
-        push();
-        translate(tempBase.x * width, tempBase.y * height);
-        fill(255, 255, 0, 180);
-        noStroke();
-        ellipse(0, 0, 30, 30);
-        fill(0);
-        textAlign(CENTER, CENTER);
-        text("?", 0, 0);
-        pop();
-    } 
-    else if (gameState === 3) {
-        runGame();
-    }
+    if (gameState === 1) drawOverlay("STEP 2: TAP ONCE TO SET BASE & START");
+    else if (gameState === 3) runGame();
 }
 
 function runGame() {
@@ -135,31 +107,53 @@ function runGame() {
         if (d < minDist) minDist = d;
     });
 
-    drawDistanceBar(minDist); // 左侧窄条
-    drawBases();            // 大本营
-    drawStars();            // 星星
-    drawRefreshBall();     // 右下角球
-    drawTimer();           // 计时器
+    drawDistanceBar(minDist);
+    drawBases();
+    drawStars();
+    drawRefreshBall();
+    drawTimer();
+    drawLeaderboard(); 
 
     let elapsed = millis() - lastMoveTime;
     if (elapsed < 2000) drawPlayerUI(myPos.x * width, myPos.y * height, elapsed);
 }
 
+// 左侧 12px 极窄条
 function drawDistanceBar(d) {
     let barW = 12;
     let threshold = 0.5 / REAL_SPACE_SIZE;
     let h = map(d, 0, 0.8, height, 0);
-    fill(d < threshold ? color(255, 0, 0) : color(255, 200));
+    fill(d < threshold ? color(255, 0, 0) : color(255, 180));
     noStroke();
     rect(0, height, barW, -h);
+}
+
+// 排行榜：黑底、白边、白字
+function drawLeaderboard() {
+    if (leaderboard.length === 0) return;
+    let x = 25; let y = 60;
+    let w = 150; let h = leaderboard.length * 25 + 10;
+
+    push();
+    fill(0); stroke(255); strokeWeight(1.5);
+    rect(x, y, w, h, 5);
+    
+    noStroke(); fill(255); textAlign(LEFT, TOP); textSize(13);
+    for (let i = 0; i < leaderboard.length; i++) {
+        let p = leaderboard[i];
+        fill(p.color.r, p.color.g, p.color.b);
+        circle(x + 15, y + 13 + i * 25, 10);
+        fill(255);
+        text(`Rank ${i + 1}: ${p.score} Stars`, x + 30, y + 7 + i * 25);
+    }
+    pop();
 }
 
 function drawRefreshBall() {
     push(); translate(width - 60, height - 60);
     fill(20, 200); stroke(255, 50); circle(0, 0, 80);
     noFill(); stroke(0, 255, 180); strokeWeight(4);
-    let elapsed = millis() - lastMoveTime;
-    if (elapsed < 2000) {
+    if (millis() - lastMoveTime < 2000) {
         rotate(millis() * 0.01);
         arc(0, 0, 45, 45, 0, PI * 1.5);
     } else {
@@ -200,13 +194,13 @@ function drawPlayerUI(x, y, elapsed) {
     let alpha = map(elapsed, 0, 2000, 255, 0);
     push(); translate(x, y);
     noFill(); stroke(255, alpha * 0.5); ellipse(0,0,30,30);
-    line(-10,0,10,0); line(0,-10,0,10);
-    stroke(255,0,0, alpha); line(0,0,0,-15);
+    line(-12,0,12,0); line(0,-12,0,12);
+    stroke(255,0,0, alpha); line(0,0,0,-16); 
     fill(red(myColor), green(myColor), blue(myColor), alpha);
     noStroke(); circle(0,0,15); pop();
 }
 
 function drawOverlay(txt) {
-    fill(0, 180); rect(0, height/2 - 50, width, 100);
+    fill(0, 220); rect(0, height/2 - 50, width, 100);
     fill(255); textAlign(CENTER, CENTER); textSize(16); text(txt, width/2, height/2);
 }
