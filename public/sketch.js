@@ -5,13 +5,14 @@ let myColor;
 let mapImg;
 let heading = 0;
 
-// 刷新逻辑
-let lastRefreshTime = -5000;
-let refreshCooldown = 5000;
+// 刷新逻辑 - 缩短为 2 秒
+let lastRefreshTime = -2000;
+let refreshCooldown = 2000; 
+let pulseDuration = 2000; // 小球出现的持续时间
 
 // 距离感应逻辑
 let minDist = 1.0;
-const REAL_SPACE_SIZE = 2.24; // 5平米对应的边长 (约2.24米)
+const REAL_SPACE_SIZE = 2.24; // 5平米对应的边长
 
 function preload() {
     mapImg = loadImage('map.jpg');
@@ -47,12 +48,15 @@ function draw() {
     image(mapImg, 0, 0, width, height);
     
     updateMinDist();
-    drawDistanceBall();    // 左下角：动态闪烁感官球
-    drawStarMarkers();     // 已激活宝藏
+    drawDistanceBall();    // 左上角：放大版的感官球
+    drawStarMarkers();     // 已激活宝藏标记
     drawRefreshBall();     // 右下角：圆形刷新按钮
 
-    // 常驻显示位置小球和圆形指南针
-    drawPlayerWithCompass(myPos.x * width, myPos.y * height, myColor);
+    // 代表位置的小球和指南针：仅在刷新后的 2 秒内显示
+    let elapsed = millis() - lastRefreshTime;
+    if (elapsed < pulseDuration) {
+        drawPlayerWithCompass(myPos.x * width, myPos.y * height, myColor, elapsed);
+    }
 }
 
 function updateMinDist() {
@@ -64,12 +68,11 @@ function updateMinDist() {
     minDist = d;
 }
 
-// 1. 左下角：距离感应球 (0.5米内变红并加速闪烁)
+// 1. 左上角：放大版距离感应球
 function drawDistanceBall() {
     push();
-    translate(60, height - 60); 
+    translate(80, 80); // 移动到左上角，留出边距
     
-    // 逻辑映射：0.5米对应的归一化距离约为 0.223 (0.5 / 2.24)
     let threshold = 0.5 / REAL_SPACE_SIZE; 
     let isBlinking = minDist < threshold;
     
@@ -77,32 +80,37 @@ function drawDistanceBall() {
     let alpha;
     
     if (isBlinking) {
-        ballColor = color(255, 0, 0); // 靠近时变为红色
-        // 越近闪烁越快：距离0时频率为20，距离0.5米时频率为2
+        ballColor = color(255, 0, 0); 
         let freq = map(minDist, 0, threshold, 20, 2);
         let blink = sin(millis() * 0.005 * freq);
         alpha = map(blink, -1, 1, 100, 255);
     } else {
-        ballColor = color(255); // 远处为常亮白色
-        alpha = 255;
+        ballColor = color(255); 
+        alpha = 200;
     }
     
     noStroke();
+    // 尺寸从原先的 45 放大到 75
     fill(red(ballColor), green(ballColor), blue(ballColor), alpha);
-    circle(0, 0, 45);
+    circle(0, 0, 75);
     
-    // 装饰外圈
-    stroke(255, 80);
-    strokeWeight(1);
+    // 装饰外圈也相应放大
+    stroke(255, 60);
+    strokeWeight(2);
     noFill();
-    circle(0, 0, 52);
+    circle(0, 0, 85);
     pop();
 }
 
-// 2. 位置小球 + 加了圆环的指南针
-function drawPlayerWithCompass(x, y, col) {
+// 2. 带有圆环的指南针小球 (带淡出效果)
+function drawPlayerWithCompass(x, y, col, elapsed) {
+    let percent = elapsed / pulseDuration;
+    let alpha = lerp(255, 0, percent); // 随时间淡出
+    let scaleVal = lerp(1, 2.5, percent); // 随时间轻微放大
+    
     push();
     translate(x, y);
+    scale(scaleVal);
     
     let targetAngle = 0;
     let closestT = null;
@@ -115,29 +123,29 @@ function drawPlayerWithCompass(x, y, col) {
 
     rotate(targetAngle - radians(heading) + PI/2);
     
-    // --- 修改：指南针增加圆环 ---
+    // 圆形指南针外框
     noFill();
-    stroke(255, 120);
+    stroke(255, alpha * 0.5);
     strokeWeight(1);
-    ellipse(0, 0, 30, 30); // 指南针外圆
+    ellipse(0, 0, 30, 30); 
     
     // 十字线
     line(-10, 0, 10, 0); 
     line(0, -10, 0, 10);
     
     // 红色指向端
-    stroke(255, 0, 0);
+    stroke(255, 0, 0, alpha);
     strokeWeight(2);
     line(0, 0, 0, -15);
     
     // 玩家位置核心球
     noStroke();
-    fill(col);
+    fill(red(col), green(col), blue(col), alpha);
     circle(0, 0, 15);
     pop();
 }
 
-// 3. 右下角：圆形刷新按钮
+// 3. 右下角：圆形刷新按钮 (无文字，循环符号)
 function drawRefreshBall() {
     let centerX = width - 60;
     let centerY = height - 60;
@@ -154,8 +162,9 @@ function drawRefreshBall() {
     noFill();
     strokeWeight(4);
     if (cooldownPercent < 1) {
+        // 旋转的加载圆弧
         stroke(100, 255, 200, 150);
-        rotate(millis() * 0.005);
+        rotate(millis() * 0.008); // 旋转速度稍微加快以匹配2秒节奏
         arc(0, 0, r * 0.6, r * 0.6, 0, PI * 1.5); 
     } else {
         stroke(0, 255, 180);
@@ -175,6 +184,7 @@ function handleRefresh() {
     let now = millis();
     if (now - lastRefreshTime > refreshCooldown) {
         lastRefreshTime = now;
+        // 保持单次刷新位移幅度
         let stepSize = 0.15; 
         myPos.x += cos(radians(heading - 90)) * stepSize;
         myPos.y += sin(radians(heading - 90)) * stepSize;
