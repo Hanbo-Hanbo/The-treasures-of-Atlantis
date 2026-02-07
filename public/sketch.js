@@ -5,13 +5,13 @@ let myColor;
 let mapImg;
 let heading = 0;
 
-// 刷新与雷达逻辑
+// 刷新逻辑
 let lastRefreshTime = -5000;
 let refreshCooldown = 5000;
-let pulseDuration = 2000;
 
 // 距离感应逻辑
 let minDist = 1.0;
+const REAL_SPACE_SIZE = 2.24; // 5平米对应的边长 (约2.24米)
 
 function preload() {
     mapImg = loadImage('map.jpg');
@@ -47,14 +47,12 @@ function draw() {
     image(mapImg, 0, 0, width, height);
     
     updateMinDist();
-    drawDistanceBall();    // 左下角：感官球
+    drawDistanceBall();    // 左下角：动态闪烁感官球
     drawStarMarkers();     // 已激活宝藏
-    drawRefreshBall();     // 右下角：循环刷新球
+    drawRefreshBall();     // 右下角：圆形刷新按钮
 
-    let elapsed = millis() - lastRefreshTime;
-    if (elapsed < pulseDuration) {
-        drawPlayerWithCompass(myPos.x * width, myPos.y * height, myColor, elapsed);
-    }
+    // 常驻显示位置小球和圆形指南针
+    drawPlayerWithCompass(myPos.x * width, myPos.y * height, myColor);
 }
 
 function updateMinDist() {
@@ -66,41 +64,46 @@ function updateMinDist() {
     minDist = d;
 }
 
-// 1. 左下角：距离感应球 (灰 -> 红，呼吸频率随距离变化)
+// 1. 左下角：距离感应球 (0.5米内变红并加速闪烁)
 function drawDistanceBall() {
     push();
-    translate(60, height - 60); // 定位于左下角
+    translate(60, height - 60); 
     
-    // 5平米空间映射：0.0（接触）到 0.4（较远）
-    let proximity = constrain(map(minDist, 0, 0.4, 1, 0), 0, 1);
-    let ballColor = lerpColor(color(80), color(255, 20, 20), proximity);
+    // 逻辑映射：0.5米对应的归一化距离约为 0.223 (0.5 / 2.24)
+    let threshold = 0.5 / REAL_SPACE_SIZE; 
+    let isBlinking = minDist < threshold;
     
-    // 闪烁频率
-    let freq = map(proximity, 0, 1, 1, 15);
-    let blink = sin(millis() * 0.005 * freq);
-    let alpha = map(blink, -1, 1, 60, 255);
+    let ballColor;
+    let alpha;
+    
+    if (isBlinking) {
+        ballColor = color(255, 0, 0); // 靠近时变为红色
+        // 越近闪烁越快：距离0时频率为20，距离0.5米时频率为2
+        let freq = map(minDist, 0, threshold, 20, 2);
+        let blink = sin(millis() * 0.005 * freq);
+        alpha = map(blink, -1, 1, 100, 255);
+    } else {
+        ballColor = color(255); // 远处为常亮白色
+        alpha = 255;
+    }
     
     noStroke();
     fill(red(ballColor), green(ballColor), blue(ballColor), alpha);
     circle(0, 0, 45);
     
-    // 外圈光晕
-    fill(red(ballColor), green(ballColor), blue(ballColor), alpha * 0.2);
-    circle(0, 0, 65);
+    // 装饰外圈
+    stroke(255, 80);
+    strokeWeight(1);
+    noFill();
+    circle(0, 0, 52);
     pop();
 }
 
-// 2. 玩家球 + 整合指南针 (出现在屏幕中心脉冲)
-function drawPlayerWithCompass(x, y, col, elapsed) {
-    let percent = elapsed / pulseDuration;
-    let alpha = lerp(255, 0, percent);
-    let scaleVal = lerp(1, 2.8, percent);
-    
+// 2. 位置小球 + 加了圆环的指南针
+function drawPlayerWithCompass(x, y, col) {
     push();
     translate(x, y);
-    scale(scaleVal);
     
-    // 指南针指向逻辑
     let targetAngle = 0;
     let closestT = null;
     let d = 1.0;
@@ -112,21 +115,29 @@ function drawPlayerWithCompass(x, y, col, elapsed) {
 
     rotate(targetAngle - radians(heading) + PI/2);
     
-    // 绘製十字
-    stroke(255, alpha * 0.6);
-    strokeWeight(1.5);
-    line(-12, 0, 12, 0); line(0, -12, 0, 12);
-    stroke(255, 0, 0, alpha); // 红端
+    // --- 修改：指南针增加圆环 ---
+    noFill();
+    stroke(255, 120);
+    strokeWeight(1);
+    ellipse(0, 0, 30, 30); // 指南针外圆
+    
+    // 十字线
+    line(-10, 0, 10, 0); 
+    line(0, -10, 0, 10);
+    
+    // 红色指向端
+    stroke(255, 0, 0);
+    strokeWeight(2);
     line(0, 0, 0, -15);
     
-    // 玩家球核心
+    // 玩家位置核心球
     noStroke();
-    fill(red(col), green(col), blue(col), alpha);
-    circle(0, 0, 18);
+    fill(col);
+    circle(0, 0, 15);
     pop();
 }
 
-// 3. 右下角：循环刷新球 (无文字，循环符号动画)
+// 3. 右下角：圆形刷新按钮
 function drawRefreshBall() {
     let centerX = width - 60;
     let centerY = height - 60;
@@ -136,26 +147,19 @@ function drawRefreshBall() {
 
     push();
     translate(centerX, centerY);
-    
-    // 背景底座
-    fill(20, 180);
-    stroke(255, 40);
-    strokeWeight(1);
+    fill(20, 200);
+    stroke(255, 50);
     circle(0, 0, r);
     
-    // 循环符号动画
     noFill();
     strokeWeight(4);
     if (cooldownPercent < 1) {
-        // 冷却中：旋转的圆弧
         stroke(100, 255, 200, 150);
-        rotate(millis() * 0.005); // 持续自转
+        rotate(millis() * 0.005);
         arc(0, 0, r * 0.6, r * 0.6, 0, PI * 1.5); 
     } else {
-        // 准备就绪：完整的亮绿色圆环
         stroke(0, 255, 180);
         circle(0, 0, r * 0.6);
-        // 内部装饰点
         fill(0, 255, 180);
         circle(0, 0, 10);
     }
@@ -163,7 +167,6 @@ function drawRefreshBall() {
 }
 
 function mousePressed() {
-    // 检测点击是否在右下角按钮区域
     let d = dist(mouseX, mouseY, width - 60, height - 60);
     if (d < 45) handleRefresh();
 }
@@ -172,7 +175,6 @@ function handleRefresh() {
     let now = millis();
     if (now - lastRefreshTime > refreshCooldown) {
         lastRefreshTime = now;
-        // 模拟 5 平米空间内的位移（边长约 2.24 米）
         let stepSize = 0.15; 
         myPos.x += cos(radians(heading - 90)) * stepSize;
         myPos.y += sin(radians(heading - 90)) * stepSize;
