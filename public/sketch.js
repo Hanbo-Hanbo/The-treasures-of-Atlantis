@@ -7,30 +7,30 @@ let heading = 0;
 
 // 逻辑控制
 let lastMoveTime = -2000;
-let pulseDuration = 2000; // 迈步后小球显示 2 秒
-let stepThreshold = 3.5;  // 步进灵敏度：数值越小越灵敏
+let pulseDuration = 2000; 
+let stepThreshold = 3.0;  
 let lastAccel = 0;
+let currentAccel = 0;
 
-// 距离感应
+// 距离与空间逻辑
 let minDist = 1.0;
-const REAL_SPACE_SIZE = 2.24; // 5平米边长 (sqrt(5) ≈ 2.24m)
+const REAL_SPACE_SIZE = 2.24; // 5平米边长
 
 function preload() {
     mapImg = loadImage('map.jpg');
 }
 
 function setup() {
-    socket = io();
+    socket = io(); 
     createCanvas(windowWidth, windowHeight).parent("sketch-container");
     myColor = color(random(255), random(255), random(255));
 
-    // 授权按钮 (iOS 必须手动点击以开启加速度计和罗盘)
-    let authBtn = createButton("START TRACKING");
+    // 授权按钮 (iOS 必须点击)
+    let authBtn = createButton("START SESSION");
     authBtn.center();
     authBtn.style('padding', '20px');
     authBtn.mousePressed(() => {
         if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-            // 同时请求罗盘和动作传感器权限
             Promise.all([
                 DeviceOrientationEvent.requestPermission(),
                 DeviceMotionEvent.requestPermission()
@@ -50,51 +50,44 @@ function setup() {
     socket.on("treasure-activated", data => { activeTreasures = data.treasures; });
 }
 
-// 核心：只有检测到物理移动才会改变坐标
 function handleMotion(event) {
     let acc = event.accelerationIncludingGravity;
     if (!acc) return;
-    
-    // 计算合加速度
-    let totalAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-    let deltaAccel = abs(totalAccel - lastAccel);
+    currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    if (abs(currentAccel - lastAccel) > stepThreshold) { triggerUpdate(); }
+    lastAccel = currentAccel;
+}
 
-    // 判定迈步：只有震动超过阈值才移动
-    if (deltaAccel > stepThreshold) {
-        lastMoveTime = millis(); // 记录移动时间，触发 2 秒显示
-        
-        // 在 5 平米内迈出一小步
-        let stepSize = 0.03; 
-        myPos.x += cos(radians(heading - 90)) * stepSize;
-        myPos.y += sin(radians(heading - 90)) * stepSize;
-        
-        myPos.x = constrain(myPos.x, 0, 1);
-        myPos.y = constrain(myPos.y, 0, 1);
+function mousePressed() {
+    let d = dist(mouseX, mouseY, width - 60, height - 60);
+    if (d < 45) { triggerUpdate(); }
+}
 
-        // 同步到服务器
-        socket.emit("refresh-location", {
-            xpos: myPos.x, ypos: myPos.y,
-            userR: red(myColor), userG: green(myColor), userB: blue(myColor)
-        });
-    }
-    lastAccel = totalAccel;
+function triggerUpdate() {
+    lastMoveTime = millis();
+    let stepSize = 0.12; 
+    myPos.x += cos(radians(heading - 90)) * stepSize;
+    myPos.y += sin(radians(heading - 90)) * stepSize;
+    myPos.x = constrain(myPos.x, 0, 1);
+    myPos.y = constrain(myPos.y, 0, 1);
+    socket.emit("refresh-location", {
+        xpos: myPos.x, ypos: myPos.y,
+        userR: red(myColor), userG: green(myColor), userB: blue(myColor)
+    });
 }
 
 function draw() {
     image(mapImg, 0, 0, width, height);
     
     updateMinDist();
-    drawDistanceBall(); // 左上角巨型感官球
-    drawStarMarkers();
-    
-    // 只有在最近 2 秒内有移动时才显示位置和指南针
+    drawDistanceBar();     // 修改：紧贴左侧的距离感应条
+    drawStarMarkers();     
+    drawRefreshBall();     
+
     let elapsed = millis() - lastMoveTime;
     if (elapsed < pulseDuration) {
         drawPlayerWithCompass(myPos.x * width, myPos.y * height, myColor, elapsed);
     }
-
-    // 右下角显示一个简单的运动指示器 (替代刷新按钮)
-    drawMotionIndicator();
 }
 
 function updateMinDist() {
@@ -106,33 +99,44 @@ function updateMinDist() {
     minDist = d;
 }
 
-// 1. 左上角：放大版距离感应球
-function drawDistanceBall() {
-    push();
-    translate(90, 90); 
+// 1. 修改：左侧垂直感应条 (越近越高，进入0.5米变红闪烁)
+function drawDistanceBar() {
+    let barWidth = 25; // 条形的宽度
+    let threshold = 0.5 / REAL_SPACE_SIZE; // 0.5米对应的比例
     
-    let threshold = 0.5 / REAL_SPACE_SIZE; 
+    // 计算条形高度：越近越高。将 minDist (0到1) 映射为高度 (height 到 0)
+    // 使用 constrain 确保在极远距离时条形也有一个最小高度
+    let barHeight = map(minDist, 0, 1, height, 0);
+    
     let isBlinking = minDist < threshold;
-    let ballColor = isBlinking ? color(255, 0, 0) : color(255);
+    let barColor;
+    let alpha = 255;
     
-    let alpha;
     if (isBlinking) {
-        let freq = map(minDist, 0, threshold, 20, 2);
-        alpha = map(sin(millis() * 0.005 * freq), -1, 1, 100, 255);
+        barColor = color(255, 0, 0); // 靠近变红
+        let freq = map(minDist, 0, threshold, 20, 2); // 越近闪烁越快
+        alpha = map(sin(millis() * 0.005 * freq), -1, 1, 120, 255);
     } else {
-        alpha = 180;
+        barColor = color(255, 180); // 远处为半透明白色
     }
     
+    push();
     noStroke();
-    fill(red(ballColor), green(ballColor), blue(ballColor), alpha);
-    circle(0, 0, 80); // 进一步放大
-    stroke(255, 40);
-    noFill();
-    circle(0, 0, 95);
+    // 绘制条形底座 (半透明黑)
+    fill(0, 100);
+    rect(0, 0, barWidth, height);
+    
+    // 绘制活跃进度条 (从底部向上升起)
+    fill(red(barColor), green(barColor), blue(barColor), alpha);
+    rect(0, height, barWidth, -barHeight); 
+    
+    // 增加一个高亮边框线
+    stroke(255, 50);
+    line(barWidth, 0, barWidth, height);
     pop();
 }
 
-// 2. 脉冲式位置球 + 指南针圆环
+// 2. 玩家球 + 圆形指南针 (保持不变，2秒消失)
 function drawPlayerWithCompass(x, y, col, elapsed) {
     let percent = elapsed / pulseDuration;
     let alpha = lerp(255, 0, percent);
@@ -146,7 +150,7 @@ function drawPlayerWithCompass(x, y, col, elapsed) {
     let closestT = null;
     activeTreasures.filter(t => !t.found).forEach(t => {
         let d = dist(myPos.x, myPos.y, t.x, t.y);
-        if (d < minDist) { closestT = t; }
+        if (d <= minDist) { closestT = t; }
     });
     if (closestT) targetAngle = atan2(closestT.y - myPos.y, closestT.x - myPos.x);
 
@@ -165,19 +169,24 @@ function drawPlayerWithCompass(x, y, col, elapsed) {
     pop();
 }
 
-// 3. 右下角：运动检测反馈 (不再需要手动点击)
-function drawMotionIndicator() {
+// 3. 右下角刷新球 (保持不变)
+function drawRefreshBall() {
     push();
     translate(width - 60, height - 60);
-    fill(20, 150);
-    stroke(255, 30);
-    circle(0, 0, 60);
-    
-    // 如果检测到加速度在跳动，显示一个小绿点
-    if (abs(currentAccel - lastAccel) > 1) {
-        fill(0, 255, 150);
-        noStroke();
-        circle(0, 0, 15);
+    fill(20, 180);
+    stroke(255, 40);
+    circle(0, 0, 80);
+    noFill();
+    stroke(0, 255, 180);
+    strokeWeight(4);
+    let elapsed = millis() - lastMoveTime;
+    if (elapsed < 1000) {
+        rotate(millis() * 0.01);
+        arc(0, 0, 45, 45, 0, PI * 1.5);
+    } else {
+        circle(0, 0, 45);
+        fill(0, 255, 180);
+        circle(0, 0, 8);
     }
     pop();
 }
