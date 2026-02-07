@@ -8,13 +8,12 @@ let heading = 0;
 // 逻辑控制
 let lastMoveTime = -2000;
 let pulseDuration = 2000; 
-let stepThreshold = 3.0;  
+let stepThreshold = 12.0; // 提高阈值，过滤手抖，确保只有行走才移动
 let lastAccel = 0;
-let currentAccel = 0;
 
-// 距离与空间逻辑
+// 距离与空间逻辑 (5平米)
 let minDist = 1.0;
-const REAL_SPACE_SIZE = 2.24; // 5平米边长
+const REAL_SPACE_SIZE = 2.24; 
 
 function preload() {
     mapImg = loadImage('map.jpg');
@@ -25,7 +24,7 @@ function setup() {
     createCanvas(windowWidth, windowHeight).parent("sketch-container");
     myColor = color(random(255), random(255), random(255));
 
-    // 授权按钮 (iOS 必须点击)
+    // 授权按钮
     let authBtn = createButton("START SESSION");
     authBtn.center();
     authBtn.style('padding', '20px');
@@ -50,26 +49,40 @@ function setup() {
     socket.on("treasure-activated", data => { activeTreasures = data.treasures; });
 }
 
+// 传感器处理：通过重力加速度变化判定“迈步”
 function handleMotion(event) {
     let acc = event.accelerationIncludingGravity;
     if (!acc) return;
-    currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-    if (abs(currentAccel - lastAccel) > stepThreshold) { triggerUpdate(); }
+    
+    // 计算当前的合加速度
+    let currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    let delta = abs(currentAccel - lastAccel);
+
+    // 只有当震动幅度超过阈值（代表迈步）时才触发更新
+    if (delta > stepThreshold) { 
+        triggerUpdate(); 
+    }
     lastAccel = currentAccel;
 }
 
 function mousePressed() {
+    // 点击右下角刷新球依然可以手动触发
     let d = dist(mouseX, mouseY, width - 60, height - 60);
     if (d < 45) { triggerUpdate(); }
 }
 
 function triggerUpdate() {
     lastMoveTime = millis();
-    let stepSize = 0.12; 
+    let stepSize = 0.08; // 缩小步长，防止快速冲向边缘
+    
+    // 根据手机当前指向的方向计算位移
     myPos.x += cos(radians(heading - 90)) * stepSize;
     myPos.y += sin(radians(heading - 90)) * stepSize;
+    
+    // 边界约束
     myPos.x = constrain(myPos.x, 0, 1);
     myPos.y = constrain(myPos.y, 0, 1);
+    
     socket.emit("refresh-location", {
         xpos: myPos.x, ypos: myPos.y,
         userR: red(myColor), userG: green(myColor), userB: blue(myColor)
@@ -80,7 +93,7 @@ function draw() {
     image(mapImg, 0, 0, width, height);
     
     updateMinDist();
-    drawDistanceBar();     // 修改：紧贴左侧的距离感应条
+    drawDistanceBar();     // 左侧实时进度条 (无闪烁)
     drawStarMarkers();     
     drawRefreshBall();     
 
@@ -99,48 +112,41 @@ function updateMinDist() {
     minDist = d;
 }
 
-// 1. 修改：左侧垂直感应条 (越近越高，进入0.5米变红闪烁)
+// 1. 左侧实时距离感应条：越近越高，不闪烁
 function drawDistanceBar() {
-    let barWidth = 25; // 条形的宽度
-    let threshold = 0.5 / REAL_SPACE_SIZE; // 0.5米对应的比例
+    let barWidth = 30; 
+    let threshold = 0.5 / REAL_SPACE_SIZE; 
     
-    // 计算条形高度：越近越高。将 minDist (0到1) 映射为高度 (height 到 0)
-    // 使用 constrain 确保在极远距离时条形也有一个最小高度
+    // 映射高度：minDist 为 0 时高度为 height，minDist 为 1 时高度为 0
     let barHeight = map(minDist, 0, 1, height, 0);
-    
-    let isBlinking = minDist < threshold;
-    let barColor;
-    let alpha = 255;
-    
-    if (isBlinking) {
-        barColor = color(255, 0, 0); // 靠近变红
-        let freq = map(minDist, 0, threshold, 20, 2); // 越近闪烁越快
-        alpha = map(sin(millis() * 0.005 * freq), -1, 1, 120, 255);
-    } else {
-        barColor = color(255, 180); // 远处为半透明白色
-    }
     
     push();
     noStroke();
-    // 绘制条形底座 (半透明黑)
-    fill(0, 100);
+    // 背景槽
+    fill(0, 80);
     rect(0, 0, barWidth, height);
     
-    // 绘制活跃进度条 (从底部向上升起)
-    fill(red(barColor), green(barColor), blue(barColor), alpha);
+    // 根据距离改变颜色：0.5米内变为红色
+    if (minDist < threshold) {
+        fill(255, 0, 0); // 红色常亮
+    } else {
+        fill(255, 200); // 白色常亮
+    }
+    
+    // 实时绘制进度条（从底部向上）
     rect(0, height, barWidth, -barHeight); 
     
-    // 增加一个高亮边框线
-    stroke(255, 50);
+    // 视觉分割线
+    stroke(255, 30);
     line(barWidth, 0, barWidth, height);
     pop();
 }
 
-// 2. 玩家球 + 圆形指南针 (保持不变，2秒消失)
+// 2. 指南针小球：保持 2 秒脉冲逻辑
 function drawPlayerWithCompass(x, y, col, elapsed) {
     let percent = elapsed / pulseDuration;
     let alpha = lerp(255, 0, percent);
-    let scaleVal = lerp(1, 2.0, percent);
+    let scaleVal = lerp(1, 1.8, percent);
     
     push();
     translate(x, y);
@@ -157,10 +163,10 @@ function drawPlayerWithCompass(x, y, col, elapsed) {
     rotate(targetAngle - radians(heading) + PI/2);
     
     noFill();
-    stroke(255, alpha * 0.4);
+    stroke(255, alpha * 0.5);
     ellipse(0, 0, 30, 30);
     line(-10, 0, 10, 0); line(0, -10, 0, 10);
-    stroke(255, 0, 0, alpha);
+    stroke(255, 0, 0, alpha); // 红色端指向目标
     line(0, 0, 0, -15);
     
     noStroke();
@@ -169,7 +175,6 @@ function drawPlayerWithCompass(x, y, col, elapsed) {
     pop();
 }
 
-// 3. 右下角刷新球 (保持不变)
 function drawRefreshBall() {
     push();
     translate(width - 60, height - 60);
