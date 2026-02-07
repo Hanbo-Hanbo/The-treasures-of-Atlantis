@@ -8,14 +8,14 @@ let mapImg;
 let heading = 0;
 let timeLeft = 300;
 
-// 状态机控制
+// 状态控制
 let gameState = 0; 
 let lastMoveTime = -2000;
-let refreshCooldown = 2000;
 let stepThreshold = 12.0; 
 let lastAccel = 0;
+let confirmBtn;
 
-const REAL_SPACE_SIZE = 4.47; // 20平米的边长
+const REAL_SPACE_SIZE = 4.47; // 20平米映射
 
 function preload() { mapImg = loadImage('map.jpg'); }
 
@@ -28,6 +28,7 @@ function setup() {
     let startBtn = createButton("STEP 1: START SETUP");
     startBtn.center();
     startBtn.style('padding', '20px');
+    startBtn.style('z-index', '100');
     startBtn.mousePressed(() => {
         if (typeof DeviceOrientationEvent.requestPermission === 'function') {
             Promise.all([
@@ -50,26 +51,34 @@ function setup() {
 }
 
 function mousePressed() {
-    if (gameState === 1) { // 步骤 2：点击选点
+    // 步骤 2：在地图任意位置自由点击以设置临时点
+    if (gameState === 1 || gameState === 2) {
         tempBase.x = mouseX / width;
         tempBase.y = mouseY / height;
-        myPos.x = tempBase.x; myPos.y = tempBase.y;
-        gameState = 2;
-        showConfirmBtn();
-    } else if (gameState === 3) { // 刷新球点击手动触发
+        myPos.x = tempBase.x; 
+        myPos.y = tempBase.y;
+        gameState = 2; // 进入待确认状态
+        
+        // 如果确认按钮还没出现，就创建一个
+        if (!confirmBtn) {
+            confirmBtn = createButton("STEP 3: CONFIRM BASE");
+            confirmBtn.style('padding', '15px');
+            confirmBtn.style('background', '#00FFB4');
+            confirmBtn.position(width/2 - 80, height - 120);
+            confirmBtn.mousePressed(finalizeBase);
+        }
+    } 
+    // 正式游戏时的手动刷新逻辑
+    else if (gameState === 3) {
         let d = dist(mouseX, mouseY, width - 60, height - 60);
         if (d < 45) triggerUpdate();
     }
 }
 
-function showConfirmBtn() {
-    let cBtn = createButton("STEP 3: CONFIRM BASE");
-    cBtn.position(width/2 - 80, height/2 + 60);
-    cBtn.style('padding', '15px');
-    cBtn.mousePressed(() => {
-        socket.emit("set-base", { x: tempBase.x, y: tempBase.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
-        gameState = 3; cBtn.hide();
-    });
+function finalizeBase() {
+    socket.emit("set-base", { x: tempBase.x, y: tempBase.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
+    gameState = 3;
+    confirmBtn.hide();
 }
 
 function handleMotion(event) {
@@ -77,7 +86,6 @@ function handleMotion(event) {
     let acc = event.accelerationIncludingGravity;
     if (!acc) return;
     let totalAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-    // 只有真实行走（震动超过阈值）才会触发位移
     if (abs(totalAccel - lastAccel) > stepThreshold) triggerUpdate();
     lastAccel = totalAccel;
 }
@@ -98,12 +106,26 @@ function triggerUpdate() {
 
 function draw() {
     image(mapImg, 0, 0, width, height);
-    if (gameState === 1) drawOverlay("STEP 2: TAP TO CHOOSE START POINT");
-    else if (gameState === 2) {
-        drawOverlay("STEP 3: CONFIRM YOUR HOME BASE");
-        fill(255, 255, 0); circle(tempBase.x * width, tempBase.y * height, 20);
+    
+    if (gameState === 1) {
+        drawOverlay("STEP 2: TAP ANYWHERE ON MAP");
     } 
-    else if (gameState === 3) runGame();
+    else if (gameState === 2) {
+        drawOverlay("CLICK AGAIN TO MOVE, OR CONFIRM");
+        // 预览大本营位置
+        push();
+        translate(tempBase.x * width, tempBase.y * height);
+        fill(255, 255, 0, 180);
+        noStroke();
+        ellipse(0, 0, 30, 30);
+        fill(0);
+        textAlign(CENTER, CENTER);
+        text("?", 0, 0);
+        pop();
+    } 
+    else if (gameState === 3) {
+        runGame();
+    }
 }
 
 function runGame() {
@@ -114,10 +136,10 @@ function runGame() {
     });
 
     drawDistanceBar(minDist); // 左侧窄条
-    drawBases();            // 常驻大本营
-    drawStars();            // 已点亮星星
-    drawRefreshBall();     // 右下角刷新球
-    drawTimer();           // 顶部计时器
+    drawBases();            // 大本营
+    drawStars();            // 星星
+    drawRefreshBall();     // 右下角球
+    drawTimer();           // 计时器
 
     let elapsed = millis() - lastMoveTime;
     if (elapsed < 2000) drawPlayerUI(myPos.x * width, myPos.y * height, elapsed);
@@ -137,7 +159,7 @@ function drawRefreshBall() {
     fill(20, 200); stroke(255, 50); circle(0, 0, 80);
     noFill(); stroke(0, 255, 180); strokeWeight(4);
     let elapsed = millis() - lastMoveTime;
-    if (elapsed < refreshCooldown) {
+    if (elapsed < 2000) {
         rotate(millis() * 0.01);
         arc(0, 0, 45, 45, 0, PI * 1.5);
     } else {
@@ -157,8 +179,7 @@ function drawBases() {
     bases.forEach(b => {
         push(); translate(b.x * width, b.y * height);
         fill(b.color.r, b.color.g, b.color.b); stroke(255);
-        rectMode(CENTER); rect(0, 5, 22, 16); 
-        triangle(-14, 5, 0, -12, 14, 5); // 房子图标
+        rectMode(CENTER); rect(0, 5, 22, 16); triangle(-14, 5, 0, -12, 14, 5);
         pop();
     });
 }
@@ -180,12 +201,12 @@ function drawPlayerUI(x, y, elapsed) {
     push(); translate(x, y);
     noFill(); stroke(255, alpha * 0.5); ellipse(0,0,30,30);
     line(-10,0,10,0); line(0,-10,0,10);
-    stroke(255,0,0, alpha); line(0,0,0,-15); // 指南针
+    stroke(255,0,0, alpha); line(0,0,0,-15);
     fill(red(myColor), green(myColor), blue(myColor), alpha);
     noStroke(); circle(0,0,15); pop();
 }
 
 function drawOverlay(txt) {
     fill(0, 180); rect(0, height/2 - 50, width, 100);
-    fill(255); textAlign(CENTER, CENTER); textSize(18); text(txt, width/2, height/2);
+    fill(255); textAlign(CENTER, CENTER); textSize(16); text(txt, width/2, height/2);
 }
