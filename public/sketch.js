@@ -1,123 +1,134 @@
 let socket;
-let myPos = { x: 0.5, y: 0.5 }; // Normalized position (0.0 to 1.0)
+let myPos = { x: 0.5, y: 0.5 };
 let activeTreasures = [];
-let stars = 0;
+let starsCount = 0;
 let heading = 0;
-let interferenceTimer = 0;
 let myColor;
-let stepThreshold = 4; // High sensitivity for 5sqm space
-let currentAccel = 0;
-let lastAccel = 0;
-let drawingHistory = [];
 let mapImg;
-let flashAlpha = 0; // Visual vibration feedback
+
+// 刷新机制变量
+let lastRefreshTime = -5000; 
+let refreshCooldown = 5000;
+let pulseDuration = 2000;
+let refreshButton;
+
+// 存储其他玩家的脉冲效果
+let otherPulses = [];
 
 function preload() {
     mapImg = loadImage('map.jpg');
 }
 
 function setup() {
-    socket = io(); 
-    let canvas = createCanvas(windowWidth, windowHeight);
-    canvas.parent("sketch-container"); 
+    socket = io();
+    createCanvas(windowWidth, windowHeight).parent("sketch-container");
     myColor = color(random(255), random(255), random(255));
 
-    let btn = createButton("START 5m² SEARCH");
-    btn.style('padding', '20px');
-    btn.center();
-    btn.mousePressed(() => {
+    // 1. 刷新位置按钮
+    refreshButton = createButton("REFRESH LOCATION");
+    refreshButton.style('padding', '15px');
+    refreshButton.position(20, height - 70);
+    refreshButton.mousePressed(handleRefresh);
+
+    // iOS 授权 (只需罗盘)
+    let authBtn = createButton("ENABLE COMPASS");
+    authBtn.center();
+    authBtn.mousePressed(() => {
         if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-            DeviceOrientationEvent.requestPermission().then(reg => {
-                if (reg === 'granted') {
+            DeviceOrientationEvent.requestPermission().then(res => {
+                if (res === 'granted') {
                     window.addEventListener('deviceorientation', e => {
                         heading = e.webkitCompassHeading || e.alpha;
                     }, true);
+                    authBtn.hide();
                 }
             });
-            DeviceMotionEvent.requestPermission().then(reg => {
-                if (reg === 'granted') {
-                    window.addEventListener('devicemotion', handleMotion, true);
-                    btn.hide();
-                }
-            });
-        } else { btn.hide(); }
+        } else { authBtn.hide(); }
     });
 
-    socket.on("status-update", data => {
-        // Visual flash if a new treasure is found
-        if (activeTreasures.length > 0 && data.treasures.filter(t => t.found).length > activeTreasures.filter(t => t.found).length) {
-            flashAlpha = 200; 
-        }
-        activeTreasures = data.treasures;
-        stars = data.stars;
-    });
-    
-    socket.on("history", data => { drawingHistory = data; });
-    socket.on("bomb-hit", () => { 
-        interferenceTimer = millis() + 5000; 
-        flashAlpha = 255; // Red flash for bomb
-    });
+    socket.on("init-game", data => { activeTreasures = data.treasures; starsCount = data.starsCount; });
+    socket.on("treasure-activated", data => { activeTreasures = data.treasures; starsCount = data.starsCount; });
+    socket.on("level-up", data => { activeTreasures = data.treasures; starsCount = data.starsCount; });
+    socket.on("player-pulse", data => { otherPulses.push({ ...data, time: millis() }); });
 }
 
-function handleMotion(event) {
-    if (millis() < interferenceTimer) return;
-    let acc = event.accelerationIncludingGravity;
-    if (!acc) return;
-    
-    currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-    
-    // Step detection logic
-    if (abs(currentAccel - lastAccel) > stepThreshold) {
-        let stepSize = 0.025; // Speed adjusted for smaller 5sqm space
+function handleRefresh() {
+    let now = millis();
+    if (now - lastRefreshTime > refreshCooldown) {
+        lastRefreshTime = now;
+        
+        // 模拟在 10m² 内移动 (3.16m x 3.16m)
+        let stepSize = 0.15; 
         myPos.x += cos(radians(heading - 90)) * stepSize;
         myPos.y += sin(radians(heading - 90)) * stepSize;
-        
         myPos.x = constrain(myPos.x, 0, 1);
         myPos.y = constrain(myPos.y, 0, 1);
-        
-        // Sync position to server [cite: 105, 108]
-        socket.emit("drawing", {
+
+        socket.emit("refresh-location", {
             xpos: myPos.x, ypos: myPos.y,
             userR: red(myColor), userG: green(myColor), userB: blue(myColor)
         });
     }
-    lastAccel = currentAccel;
 }
 
 function draw() {
-    image(mapImg, 0, 0, width, height); // Proportional background [cite: 178]
-    let isInterfered = millis() < interferenceTimer;
+    image(mapImg, 0, 0, width, height);
+    
+    // 2. 绘制已激活的宝藏（星星标记）
+    drawStarMarkers();
 
-    // Draw history trails (proportional to window size) [cite: 152-155]
-    for (let h of drawingHistory) {
-        fill(h.userR, h.userG, h.userB, 50);
-        noStroke();
-        circle(h.xpos * width, h.ypos * height, 8);
+    // 3. 绘制自己的位置（2秒淡出）
+    let myElapsed = millis() - lastRefreshTime;
+    if (myElapsed < pulseDuration) {
+        drawPulse(myPos.x * width, myPos.y * height, myColor, myElapsed);
     }
 
-    drawCompassUI(isInterfered);
-
-    // Draw player (proportional to window size) [cite: 123-124]
-    fill(myColor);
-    stroke(255);
-    strokeWeight(3);
-    circle(myPos.x * width, myPos.y * height, 25);
-
-    // Visual vibration effect
-    if (flashAlpha > 0) {
-        fill(255, 0, 0, flashAlpha);
-        rect(0, 0, width, height);
-        flashAlpha -= 10; 
+    // 绘制其他玩家的脉冲
+    for (let i = otherPulses.length - 1; i >= 0; i--) {
+        let p = otherPulses[i];
+        let elapsed = millis() - p.time;
+        if (elapsed < pulseDuration) {
+            drawPulse(p.xpos * width, p.ypos * height, color(p.userR, p.userG, p.userB), elapsed);
+        } else {
+            otherPulses.splice(i, 1);
+        }
     }
 
-    // Debug sensor data
-    fill(255);
-    textSize(10);
-    textAlign(LEFT);
-    text("Sensor: " + nf(currentAccel, 1, 2), 10, height - 10);
+    drawCompassUI();
+    drawHUD();
 }
 
-function drawCompassUI(isInterfered) {
+function drawPulse(x, y, col, elapsed) {
+    let percent = elapsed / pulseDuration;
+    let size = lerp(20, 80, percent);
+    let alpha = lerp(255, 0, percent);
+    
+    noStroke();
+    fill(red(col), green(col), blue(col), alpha);
+    circle(x, y, size);
+}
+
+function drawStarMarkers() {
+    activeTreasures.forEach(t => {
+        if (t.found && t.foundByColor) {
+            push();
+            translate(t.x * width, t.y * height);
+            fill(t.foundByColor.r, t.foundByColor.g, t.foundByColor.b);
+            noStroke();
+            // 绘制一个小星星
+            beginShape();
+            for (let i = 0; i < 10; i++) {
+                let angle = TWO_PI * i / 10;
+                let r = (i % 2 === 0) ? 10 : 5;
+                vertex(r * cos(angle), r * sin(angle));
+            }
+            endShape(CLOSE);
+            pop();
+        }
+    });
+}
+
+function drawCompassUI() {
     let closestT = null;
     let minDist = Infinity;
     activeTreasures.filter(t => !t.found).forEach(t => {
@@ -126,38 +137,31 @@ function drawCompassUI(isInterfered) {
     });
 
     push();
-    translate(width / 2, height - 150);
+    translate(width / 2, height - 160);
     let targetAngle = closestT ? atan2(closestT.y - myPos.y, closestT.x - myPos.x) : 0;
-    rotate(isInterfered ? random(TWO_PI) : (targetAngle - radians(heading) + PI/2));
+    rotate(targetAngle - radians(heading) + PI/2);
     
-    // Crosshair Compass
     strokeWeight(4);
-    stroke(200, 150);
-    line(0, -50, 0, 50); 
-    line(-50, 0, 50, 0);
-    stroke(isInterfered ? 100 : color(255, 0, 0)); 
-    line(0, 0, 0, -50); // Red tip points to treasure
+    stroke(200, 100);
+    line(0, -40, 0, 40); line(-40, 0, 40, 0); // 十字
+    stroke(255, 0, 0); line(0, 0, 0, -40); // 红色端
     pop();
 
-    // English UI Text
-    fill(0, 180);
-    rectMode(CENTER);
-    rect(width/2, 60, 220, 40, 10);
-    fill(255);
-    textAlign(CENTER);
-    textSize(20);
-    text(`⭐ SCORE: ${stars}`, width / 2, 68);
-    
     if (closestT) {
-        fill(0, 180);
-        rect(width/2, height - 85, 240, 40, 10);
-        fill(255);
-        // Mapping to 5sqm: distance ratio * 2.24m
-        text(`TARGET: ${nf(minDist * 2.24, 1, 2)}m`, width / 2, height - 78);
+        fill(255); textAlign(CENTER); textSize(18);
+        text(`NEAREST: ${nf(minDist * 3.16, 1, 2)}m`, width/2, height - 80);
     }
+}
+
+function drawHUD() {
+    // 冷却进度条
+    let cooldownLeft = max(0, refreshCooldown - (millis() - lastRefreshTime));
+    let barWidth = map(cooldownLeft, 0, refreshCooldown, 0, 200);
     
-    if (isInterfered) {
-        fill(255, 0, 0);
-        text("⚠️ SIGNAL INTERFERENCE", width / 2, height / 2);
-    }
+    fill(0, 150); rect(20, height - 100, 200, 10);
+    fill(0, 255, 200); rect(20, height - 100, barWidth, 10);
+    
+    fill(255); textAlign(LEFT); textSize(14);
+    text(cooldownLeft > 0 ? "RECHARGING..." : "READY TO SCAN", 20, height - 110);
+    text(`STARS: ${starsCount} ⭐`, 20, 40);
 }
