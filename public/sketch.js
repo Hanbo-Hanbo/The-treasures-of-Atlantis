@@ -4,64 +4,55 @@ let allPlayers = {}, myColor, mapImg, timeLeft = 300;
 let gameState = 0, startTime, originCoords = null;
 let heading = 0; 
 
-// --- Audio & Beep Control ---
+// --- Debugging Raw Data ---
+let rawLat = "N/A", rawLon = "N/A", gpsAccuracy = "N/A";
+
 let osc = null; 
 let nextBeepTime = 0;
 
 const GAME_RANGE_METERS = 7.07; 
 const LERP_FACTOR = 0.08;       
 
-function preload() { 
-    mapImg = loadImage('map.jpg'); 
-}
+function preload() { mapImg = loadImage('map.jpg'); }
 
 function setup() {
     socket = io();
     createCanvas(windowWidth, windowHeight).parent("sketch-container");
     myColor = color(random(255), random(255), random(255));
     
-    // Safety check for p5.sound library
     if (typeof p5.Oscillator !== 'undefined') {
         osc = new p5.Oscillator('triangle');
-        osc.amp(0); 
-        osc.start();
+        osc.amp(0); osc.start();
     }
 
-    // Data Listeners
-    socket.on("init-game", d => { 
-        treasures = d.treasures || []; 
-        bases = d.bases || []; 
-        timeLeft = d.gameTime || 300; 
-    });
+    socket.on("init-game", d => { treasures = d.treasures || []; bases = d.bases || []; timeLeft = d.gameTime || 300; });
     socket.on("update-treasures", d => treasures = d || []);
     socket.on("update-bases", d => bases = d || []);
     socket.on("update-players", d => allPlayers = d || {});
     socket.on("update-leaderboard", d => leaderboard = d || []);
     socket.on("timer-update", t => timeLeft = t);
-    
     socket.on("game-over", data => { finalRanking = data || []; gameState = 4; });
-    socket.on("game-reset", () => { 
-        gameState = 0; startTime = millis(); treasures = []; bases = []; 
-        leaderboard = []; finalRanking = []; originCoords = null;
-    });
+    socket.on("game-reset", () => { gameState = 0; startTime = millis(); originCoords = null; });
 }
 
 function mousePressed() {
     if (gameState === 0) {
-        // Activate Audio Context
         if (typeof userStartAudio !== 'undefined') userStartAudio();
 
         if ("geolocation" in navigator) {
-            navigator.geolocation.watchPosition(handleGPS, e => console.log(e), { enableHighAccuracy: true });
+            // 核心修复：强制高精度模式
+            navigator.geolocation.watchPosition(handleGPS, 
+                (err) => { rawLat = "ERR: " + err.code; }, 
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+            );
+        } else {
+            rawLat = "NOT SUPPORTED";
         }
         
-        // Request Compass (iOS)
         if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
             DeviceOrientationEvent.requestPermission().then(res => {
                 if (res === 'granted') {
-                    window.addEventListener('deviceorientation', e => {
-                        heading = e.webkitCompassHeading || e.alpha || 0;
-                    }, true);
+                    window.addEventListener('deviceorientation', e => { heading = e.webkitCompassHeading || e.alpha || 0; }, true);
                 }
             });
         }
@@ -75,9 +66,15 @@ function mousePressed() {
 }
 
 function handleGPS(position) {
+    // 捕获原始数据用于诊断
+    rawLat = position.coords.latitude.toFixed(6);
+    rawLon = position.coords.longitude.toFixed(6);
+    gpsAccuracy = position.coords.accuracy.toFixed(1) + "m";
+
     if (gameState !== 3) return;
     let lat = position.coords.latitude;
     let lon = position.coords.longitude;
+    
     if (!originCoords) originCoords = { lat, lon };
 
     let deltaY = (lat - originCoords.lat) * 111320;
@@ -90,25 +87,36 @@ function handleGPS(position) {
 }
 
 function draw() {
-    background(0); // Fallback if image fails
-    
-    // Update Lerp
+    background(0);
     myPos.x = lerp(myPos.x, targetPos.x, LERP_FACTOR);
     myPos.y = lerp(myPos.y, targetPos.y, LERP_FACTOR);
 
     if (mapImg) image(mapImg, 0, 0, width, height);
 
     if (gameState === 0) {
-        drawOverlay("TAP TO SET BASE & START\n(50m2 GPS Mode)");
+        drawOverlay("TAP TO START");
     } else if (gameState === 3) {
         runGameSession();
-        drawSubtleInfo(); 
+        drawDiagnosticInfo(); // 红色实时诊断文字
     } else if (gameState === 4) {
         if (osc) osc.amp(0); 
         drawGameOverTable();
     }
 }
 
+function drawDiagnosticInfo() {
+    push();
+    textAlign(LEFT, BOTTOM);
+    textSize(10);
+    // 如果数字是红色的且在变，说明传感器正常
+    fill(255, 0, 0); 
+    text(`RAW LAT: ${rawLat}`, 15, height - 45);
+    text(`RAW LON: ${rawLon}`, 15, height - 30);
+    text(`ACCURACY: ${gpsAccuracy}`, 15, height - 15);
+    pop();
+}
+
+// --- 其余 UI 函数保持不变 ---
 function runGameSession() {
     let minDist = 1.0;
     if (treasures) {
@@ -117,12 +125,9 @@ function runGameSession() {
             if (d < minDist) minDist = d;
         });
     }
-
     handleAudioFeedback(minDist);
     drawDistanceBar(minDist);
     drawBases(); drawStars(); drawTimer(); drawLeaderboard();
-    
-    // Draw identity markers for everyone
     for (let id in allPlayers) {
         let p = allPlayers[id];
         if (p && p.color) drawPlayerMarker(p.x * width, p.y * height, p.color, id === socket.id);
@@ -131,13 +136,10 @@ function runGameSession() {
 
 function handleAudioFeedback(d) {
     if (!osc || d > 0.5) return; 
-    
     let interval = map(d, 0, 0.5, 100, 1200); 
     let freq = map(d, 0, 0.5, 880, 220); 
-    
     if (millis() > nextBeepTime) {
-        osc.freq(freq);
-        osc.amp(0.2, 0.05);
+        osc.freq(freq); osc.amp(0.2, 0.05);
         setTimeout(() => { if(osc) osc.amp(0, 0.1); }, 80);
         nextBeepTime = millis() + interval;
     }
@@ -147,30 +149,14 @@ function drawPlayerMarker(x, y, col, isMe) {
     push(); translate(x, y); 
     fill(col.r, col.g, col.b); stroke(255); strokeWeight(isMe ? 3 : 1);
     circle(0, 0, 18);
-    
     if (isMe) {
-        push();
-        rotate(radians(heading || 0));
-        stroke(255, 0, 0); strokeWeight(2);
-        line(0, 0, 0, -20);
-        fill(255, 0, 0); noStroke();
-        triangle(-4, -15, 4, -15, 0, -22);
-        pop();
-        
+        push(); rotate(radians(heading || 0)); stroke(255, 0, 0); strokeWeight(2); line(0, 0, 0, -20);
+        fill(255, 0, 0); noStroke(); triangle(-4, -15, 4, -15, 0, -22); pop();
         noFill(); stroke(255, 100); ellipse(0, 0, 35, 35);
-        fill(255); textAlign(CENTER); textSize(10); text("YOU", 0, 28);
     }
     pop();
 }
 
-function drawSubtleInfo() {
-    push();
-    textAlign(LEFT, BOTTOM); textSize(9); fill(255, 80);
-    text(`GPS: [${myPos.x.toFixed(3)}, ${myPos.y.toFixed(3)}]`, 15, height - 15);
-    pop();
-}
-
-// --- Visual Helpers (Unchanged logic) ---
 function drawDistanceBar(d) { let barW = 8; fill(d < (0.5/GAME_RANGE_METERS) ? color(255, 0, 0) : color(255, 180)); noStroke(); rect(0, height, barW, -map(d, 0, 0.8, height, 0)); }
 function drawLeaderboard() { if (!leaderboard || leaderboard.length === 0) return; push(); fill(0, 200); stroke(255); strokeWeight(1); rect(20, 65, 150, leaderboard.length * 25 + 10, 5); noStroke(); fill(255); textAlign(LEFT, TOP); textSize(12); leaderboard.forEach((p, i) => { if(p.color) { fill(p.color.r, p.color.g, p.color.b); circle(35, 78 + i * 25, 10); fill(255); text(`Rank ${i+1}: ${p.score} ⭐`, 50, 72 + i * 25); } }); pop(); }
 function drawTimer() { fill(0, 150); rect(width/2 - 50, 15, 100, 35, 8); fill(255); textAlign(CENTER, CENTER); text(timeLeft < 0 ? "0:00" : `${floor(timeLeft/60)}:${nf(timeLeft%60, 2)}`, width/2, 32); }
