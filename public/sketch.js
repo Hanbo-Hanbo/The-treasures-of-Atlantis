@@ -4,7 +4,8 @@ let allPlayers = {}, myColor, mapImg, timeLeft = 300;
 let gameState = 0, startTime, originCoords = null;
 let heading = 0; 
 
-// --- Debug & Audio ---
+// --- Debugging Data ---
+let rawHeading = "N/A";
 let rawLat = "N/A", rawLon = "N/A", gpsAccuracy = "N/A";
 let osc = null, nextBeepTime = 0;
 
@@ -23,14 +24,12 @@ function setup() {
         osc = new p5.Oscillator('triangle'); osc.amp(0); osc.start();
     }
 
-    // --- Socket Listeners ---
     socket.on("init-game", d => { treasures = d.treasures || []; bases = d.bases || []; timeLeft = d.gameTime || 300; });
     socket.on("update-treasures", d => treasures = d || []);
-    socket.on("update-bases", d => { bases = d || []; }); // Update list from server
-    socket.on("update-players", d => { allPlayers = d || {}; });
-    socket.on("update-leaderboard", d => { leaderboard = d || []; });
-    socket.on("timer-update", t => { timeLeft = t; });
-    
+    socket.on("update-bases", d => bases = d || []);
+    socket.on("update-players", d => allPlayers = d || {});
+    socket.on("update-leaderboard", d => leaderboard = d || []);
+    socket.on("timer-update", t => timeLeft = t);
     socket.on("game-over", data => { finalRanking = data || []; gameState = 4; });
     socket.on("game-reset", () => { 
         gameState = 0; startTime = millis(); treasures = []; bases = []; 
@@ -38,39 +37,41 @@ function setup() {
     });
 }
 
+// CRITICAL: Request Compass Permission IMMEDIATELY on click
 function mousePressed() {
     if (gameState === 0) {
-        // 1. Audio and Sensor Permission
+        // 1. Audio and Orientation Permission MUST BE FIRST
         if (typeof userStartAudio !== 'undefined') userStartAudio();
 
         if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-            DeviceOrientationEvent.requestPermission().then(res => {
-                if (res === 'granted') {
-                    window.addEventListener('deviceorientation', handleOrientation, true);
-                }
-            });
+            // iOS 13+ requirement: must be triggered directly by user tap
+            DeviceOrientationEvent.requestPermission()
+                .then(response => {
+                    if (response === 'granted') {
+                        window.addEventListener('deviceorientation', handleOrientation, true);
+                    } else { rawHeading = "DENIED"; }
+                })
+                .catch(err => { rawHeading = "ERR: " + err; });
         } else {
+            // Android or Desktop
             window.addEventListener('deviceorientation', handleOrientation, true);
         }
 
+        // 2. Start GPS
         if ("geolocation" in navigator) {
             navigator.geolocation.watchPosition(handleGPS, null, { enableHighAccuracy: true });
         }
 
-        // 2. Set Local Base Immediately (Fix: First player visibility)
+        // 3. Local Base Placement (Instant visibility)
         let clickX = mouseX / width;
         let clickY = mouseY / height;
         targetPos.x = clickX; targetPos.y = clickY;
         myPos.x = clickX; myPos.y = clickY;
 
         const myBase = { 
-            id: socket.id, 
-            x: clickX, 
-            y: clickY, 
+            id: socket.id, x: clickX, y: clickY, 
             color: { r: red(myColor), g: green(myColor), b: blue(myColor) } 
         };
-        
-        // Add to local bases array instantly so you see it even without server response
         bases.push(myBase); 
         
         socket.emit("set-base", { x: clickX, y: clickY, color: myBase.color });
@@ -81,12 +82,14 @@ function mousePressed() {
 }
 
 function handleOrientation(e) {
-    // Handling absolute north for iOS and relative for Android
+    // webkitCompassHeading is the most accurate for iOS absolute north
     if (e.webkitCompassHeading) {
         heading = e.webkitCompassHeading;
-    } else if (e.absolute === true || typeof e.absolute === 'undefined') {
+    } else {
+        // Fallback for Android (requires absolute orientation)
         heading = 360 - e.alpha;
     }
+    rawHeading = floor(heading) + "°";
 }
 
 function handleGPS(position) {
@@ -105,16 +108,6 @@ function handleGPS(position) {
     sync();
 }
 
-function handleKeyboard() {
-    if (gameState !== 3) return;
-    let moved = false;
-    if (keyIsDown(87) || keyIsDown(UP_ARROW)) { targetPos.y -= KB_SPEED; moved = true; } 
-    if (keyIsDown(83) || keyIsDown(DOWN_ARROW)) { targetPos.y += KB_SPEED; moved = true; }
-    if (keyIsDown(65) || keyIsDown(LEFT_ARROW)) { targetPos.x -= KB_SPEED; moved = true; }
-    if (keyIsDown(68) || keyIsDown(RIGHT_ARROW)) { targetPos.x += KB_SPEED; moved = true; }
-    if (moved) sync();
-}
-
 function sync() {
     socket.emit("refresh-location", { 
         xpos: myPos.x, ypos: myPos.y, 
@@ -124,7 +117,6 @@ function sync() {
 
 function draw() {
     background(0);
-    if (gameState === 3) handleKeyboard();
     myPos.x = lerp(myPos.x, targetPos.x, LERP_FACTOR);
     myPos.y = lerp(myPos.y, targetPos.y, LERP_FACTOR);
 
@@ -164,7 +156,7 @@ function drawPlayerMarker(x, y, col, isMe) {
     fill(col.r, col.g, col.b); stroke(255); strokeWeight(isMe ? 3 : 1);
     circle(0, 0, 18);
     if (isMe) {
-        // Direction pointer logic
+        // The Compass Needle
         push();
         rotate(radians(heading));
         stroke(255, 0, 0); strokeWeight(2.5);
@@ -177,24 +169,23 @@ function drawPlayerMarker(x, y, col, isMe) {
 }
 
 function drawBases() {
-    if (!bases || bases.length === 0) return;
+    if (!bases) return;
     bases.forEach(b => {
-        if (b && b.color) {
-            push(); translate(b.x * width, b.y * height);
-            fill(b.color.r, b.color.g, b.color.b); stroke(255); strokeWeight(1.5);
-            rectMode(CENTER); rect(0, 5, 24, 18); triangle(-16, 5, 0, -14, 16, 5);
-            pop();
-        }
+        push(); translate(b.x * width, b.y * height);
+        fill(b.color.r, b.color.g, b.color.b); stroke(255); strokeWeight(1.5);
+        rectMode(CENTER); rect(0, 5, 24, 18); triangle(-16, 5, 0, -14, 16, 5);
+        pop();
     });
 }
 
 function drawDiagnostic() {
     push(); textAlign(LEFT, BOTTOM); textSize(9); fill(255, 150);
-    text(`DIR: ${floor(heading)}° | GPS: ${rawLat}, ${rawLon}`, 15, height - 15);
+    // Observe rawHeading here to see if sensors are working
+    text(`DIR: ${rawHeading} | GPS: ${rawLat}, ${rawLon} | ACC: ${gpsAccuracy}`, 15, height - 15);
     pop();
 }
 
-// --- Visual Helpers (drawDistanceBar, drawLeaderboard, drawTimer, drawStars, drawOverlay, drawGameOverTable, handleAudioFeedback) ---
+// ... Visual Helpers: drawDistanceBar, drawLeaderboard, drawTimer, drawStars, drawOverlay, drawGameOverTable, handleAudioFeedback ...
 function drawDistanceBar(d) { let barW = 8; fill(d < (0.5/GAME_RANGE_METERS) ? color(255, 0, 0) : color(255, 180)); noStroke(); rect(0, height, barW, -map(d, 0, 0.8, height, 0)); }
 function drawLeaderboard() { if (!leaderboard || leaderboard.length === 0) return; push(); fill(0, 200); stroke(255); strokeWeight(1); rect(20, 65, 150, leaderboard.length * 25 + 10, 5); noStroke(); fill(255); textAlign(LEFT, TOP); textSize(12); leaderboard.forEach((p, i) => { if(p.color) { fill(p.color.r, p.color.g, p.color.b); circle(35, 78 + i * 25, 10); fill(255); text(`Rank ${i+1}: ${p.score} ⭐`, 50, 72 + i * 25); } }); pop(); }
 function drawTimer() { fill(0, 150); rect(width/2 - 50, 15, 100, 35, 8); fill(255); textAlign(CENTER, CENTER); text(timeLeft < 0 ? "0:00" : `${floor(timeLeft/60)}:${nf(timeLeft%60, 2)}`, width/2, 32); }
