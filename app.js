@@ -8,7 +8,7 @@ app.use(express.static("public"));
 let treasures = [];
 let bases = [];
 let gameTime = 300; 
-let players = {}; // 存储所有玩家数据: { id: { x, y, color, score } }
+let players = {}; 
 
 function initMap() {
     treasures = Array.from({length: 5}, () => ({
@@ -25,16 +25,13 @@ setInterval(() => {
         gameTime = 300;
         initMap(); 
         bases = [];
-        // 重置所有玩家分数但保留位置
         for (let id in players) { players[id].score = 0; }
-        io.emit("game-reset");
+        io.emit("game-reset"); 
     }
 }, 1000);
 
 io.on("connection", (socket) => {
-    // 初始化新玩家
     players[socket.id] = { x: 0.5, y: 0.5, color: null, score: 0 };
-    
     socket.emit("init-game", { treasures, bases, gameTime });
 
     socket.on("set-base", (data) => {
@@ -50,30 +47,24 @@ io.on("connection", (socket) => {
 
     socket.on("refresh-location", (data) => {
         if(!players[socket.id]) return;
-
-        // 更新玩家位置
         players[socket.id].x = data.xpos;
         players[socket.id].y = data.ypos;
 
-        // 占领大本营逻辑
         bases.forEach(b => {
             if (b.id !== socket.id && Math.hypot(data.xpos - b.x, data.ypos - b.y) < 0.1) {
                 b.color = data.color;
             }
         });
 
-        // 发现星星逻辑
         let scoreChanged = false;
         treasures.forEach(t => {
             if (!t.found && Math.hypot(data.xpos - t.x, data.ypos - t.y) < 0.08) {
-                t.found = true; 
-                t.foundBy = data.color;
+                t.found = true; t.foundBy = data.color;
                 players[socket.id].score++;
                 scoreChanged = true;
             }
         });
 
-        // 广播所有玩家最新状态
         io.emit("update-players", players);
         if (scoreChanged) {
             let lb = Object.values(players).filter(p => p.color !== null).sort((a,b)=>b.score-a.score).slice(0,5);
