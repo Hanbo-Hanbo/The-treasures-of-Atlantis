@@ -10,10 +10,11 @@ let osc = null;
 let nextBeepTime = 0;
 
 // --- Tuning Parameters ---
-const GAME_RANGE_METERS = 7.07; // 50m2 area
-const LERP_FACTOR = 0.05;       // Smoother sliding (lowered for more stability)
-const MIN_ACCURACY = 20;        // Ignore GPS data if accuracy > 20 meters
-const JUMP_LIMIT = 0.15;        // Max allowed move per GPS update (prevents teleporting)
+const GAME_RANGE_METERS = 7.07; 
+const LERP_FACTOR = 0.05;       
+const MIN_ACCURACY = 20;        
+const JUMP_LIMIT = 0.15;        
+const KB_SPEED = 0.005; // PC movement speed per frame (approx 2m/s)
 
 function preload() { mapImg = loadImage('map.jpg'); }
 
@@ -27,6 +28,7 @@ function setup() {
         osc.amp(0); osc.start();
     }
 
+    // Server listeners
     socket.on("init-game", d => { treasures = d.treasures || []; bases = d.bases || []; timeLeft = d.gameTime || 300; });
     socket.on("update-treasures", d => treasures = d || []);
     socket.on("update-bases", d => bases = d || []);
@@ -40,15 +42,9 @@ function setup() {
 function mousePressed() {
     if (gameState === 0) {
         if (typeof userStartAudio !== 'undefined') userStartAudio();
-
         if ("geolocation" in navigator) {
-            navigator.geolocation.watchPosition(handleGPS, null, { 
-                enableHighAccuracy: true, 
-                maximumAge: 0, 
-                timeout: 10000 
-            });
+            navigator.geolocation.watchPosition(handleGPS, null, { enableHighAccuracy: true, maximumAge: 0 });
         }
-        
         if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
             DeviceOrientationEvent.requestPermission().then(res => {
                 if (res === 'granted') {
@@ -56,7 +52,6 @@ function mousePressed() {
                 }
             });
         }
-
         targetPos.x = mouseX / width; targetPos.y = mouseY / height;
         myPos.x = targetPos.x; myPos.y = targetPos.y;
         socket.emit("set-base", { x: targetPos.x, y: targetPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
@@ -66,65 +61,68 @@ function mousePressed() {
 }
 
 function handleGPS(position) {
+    if (gameState !== 3) return;
     let lat = position.coords.latitude;
     let lon = position.coords.longitude;
     let acc = position.coords.accuracy;
+    rawLat = lat.toFixed(6); rawLon = lon.toFixed(6); gpsAccuracy = acc.toFixed(1) + "m";
 
-    // Debug Info
-    rawLat = lat.toFixed(6);
-    rawLon = lon.toFixed(6);
-    gpsAccuracy = acc.toFixed(1) + "m";
-
-    if (gameState !== 3) return;
-
-    // --- ANTI-TELEPORT FILTER ---
-    // 1. Accuracy Filter: If signal is too weak, ignore it
     if (acc > MIN_ACCURACY) return;
-
     if (!originCoords) originCoords = { lat, lon };
 
     let deltaY = (lat - originCoords.lat) * 111320;
     let deltaX = (lon - originCoords.lon) * (111320 * cos(radians(lat)));
+    let nx = constrain(0.5 + (deltaX / GAME_RANGE_METERS), 0.01, 0.99);
+    let ny = constrain(0.5 - (deltaY / GAME_RANGE_METERS), 0.01, 0.99);
 
-    let newTargetX = constrain(0.5 + (deltaX / GAME_RANGE_METERS), 0.01, 0.99);
-    let newTargetY = constrain(0.5 - (deltaY / GAME_RANGE_METERS), 0.01, 0.99);
-
-    // 2. Distance Jump Filter: If the change is too huge (teleport), ignore it
-    let moveDist = dist(targetPos.x, targetPos.y, newTargetX, newTargetY);
-    if (moveDist < JUMP_LIMIT) {
-        targetPos.x = newTargetX;
-        targetPos.y = newTargetY;
+    if (dist(targetPos.x, targetPos.y, nx, ny) < JUMP_LIMIT) {
+        targetPos.x = nx; targetPos.y = ny;
     }
-    
+}
+
+// --- NEW: PC Keyboard Controls ---
+function handleKeyboard() {
+    if (gameState !== 3) return;
+    let moved = false;
+    if (keyIsDown(87) || keyIsDown(UP_ARROW)) { targetPos.y -= KB_SPEED; moved = true; }    // W
+    if (keyIsDown(83) || keyIsDown(DOWN_ARROW)) { targetPos.y += KB_SPEED; moved = true; }  // S
+    if (keyIsDown(65) || keyIsDown(LEFT_ARROW)) { targetPos.x -= KB_SPEED; moved = true; }  // A
+    if (keyIsDown(68) || keyIsDown(RIGHT_ARROW)) { targetPos.x += KB_SPEED; moved = true; } // D
+
+    if (moved) {
+        targetPos.x = constrain(targetPos.x, 0.01, 0.99);
+        targetPos.y = constrain(targetPos.y, 0.01, 0.99);
+        sync(); // Update other players
+    }
+}
+
+function sync() {
     socket.emit("refresh-location", { xpos: myPos.x, ypos: myPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
 }
 
 function draw() {
     background(0);
-    // Smoother interpolation
+    if (gameState === 3) handleKeyboard(); // Check keyboard every frame
+
     myPos.x = lerp(myPos.x, targetPos.x, LERP_FACTOR);
     myPos.y = lerp(myPos.y, targetPos.y, LERP_FACTOR);
 
     if (mapImg) image(mapImg, 0, 0, width, height);
 
     if (gameState === 0) {
-        drawOverlay("TAP TO START");
+        drawOverlay("TAP TO START\n(Mobile: GPS | PC: WASD)");
     } else if (gameState === 3) {
         runGameSession();
         drawDiagnosticInfo(); 
     } else if (gameState === 4) {
-        if (osc) osc.amp(0); 
-        drawGameOverTable();
+        if (osc) osc.amp(0); drawGameOverTable();
     }
 }
 
 function drawDiagnosticInfo() {
-    push();
-    textAlign(LEFT, BOTTOM); textSize(10);
-    // Green if GPS is stable, Red if jumping/weak
+    push(); textAlign(LEFT, BOTTOM); textSize(10);
     fill(parseFloat(gpsAccuracy) > MIN_ACCURACY ? color(255, 0, 0) : color(0, 255, 0));
-    text(`RAW: ${rawLat}, ${rawLon}`, 15, height - 30);
-    text(`ACCURACY: ${gpsAccuracy} (Limit: ${MIN_ACCURACY}m)`, 15, height - 15);
+    text(`GPS: ${rawLat}, ${rawLon} | ACC: ${gpsAccuracy}`, 15, height - 15);
     pop();
 }
 
@@ -145,7 +143,6 @@ function runGameSession() {
     }
 }
 
-// Sound Feedback
 function handleAudioFeedback(d) {
     if (!osc || d > 0.5) return; 
     let interval = map(d, 0, 0.5, 120, 1500); 
@@ -157,7 +154,6 @@ function handleAudioFeedback(d) {
     }
 }
 
-// Player with Compass Needle
 function drawPlayerMarker(x, y, col, isMe) {
     push(); translate(x, y); 
     fill(col.r, col.g, col.b); stroke(255); strokeWeight(isMe ? 3 : 1);
@@ -170,7 +166,7 @@ function drawPlayerMarker(x, y, col, isMe) {
     pop();
 }
 
-// UI Components
+// Visual UI components remain unchanged
 function drawDistanceBar(d) { let barW = 8; fill(d < (0.5/GAME_RANGE_METERS) ? color(255, 0, 0) : color(255, 180)); noStroke(); rect(0, height, barW, -map(d, 0, 0.8, height, 0)); }
 function drawLeaderboard() { if (!leaderboard || leaderboard.length === 0) return; push(); fill(0, 200); stroke(255); strokeWeight(1); rect(20, 65, 150, leaderboard.length * 25 + 10, 5); noStroke(); fill(255); textAlign(LEFT, TOP); textSize(12); leaderboard.forEach((p, i) => { if(p.color) { fill(p.color.r, p.color.g, p.color.b); circle(35, 78 + i * 25, 10); fill(255); text(`Rank ${i+1}: ${p.score} ⭐`, 50, 72 + i * 25); } }); pop(); }
 function drawTimer() { fill(0, 150); rect(width/2 - 50, 15, 100, 35, 8); fill(255); textAlign(CENTER, CENTER); text(timeLeft < 0 ? "0:00" : `${floor(timeLeft/60)}:${nf(timeLeft%60, 2)}`, width/2, 32); }
