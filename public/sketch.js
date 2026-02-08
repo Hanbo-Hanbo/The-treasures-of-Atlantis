@@ -4,7 +4,7 @@ let gameState = 0, lastPulseTime = -2000, lastAccel = 0, startTime;
 
 // --- Tuning Parameters ---
 const REAL_SIZE = 4.47; 
-const STEP_THRES = 5.0; // Lowered sensitivity (increased threshold from 1.0 to 5.0)
+const STEP_THRES = 2.8; 
 const STEP_VAL = 0.03;  // Movement step size
 
 function preload() { 
