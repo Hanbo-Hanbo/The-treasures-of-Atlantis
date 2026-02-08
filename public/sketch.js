@@ -9,12 +9,11 @@ let heading = 0;
 let timeLeft = 300;
 
 // 状态控制
-let gameState = 0; // 0:授权, 1:点击地图即开始, 3:正式游戏
+let gameState = 0; 
 let lastMoveTime = -2000;
 let refreshCooldown = 2000;
 let stepThreshold = 12.0; 
 let lastAccel = 0;
-let currentAccel = 0;
 
 const REAL_SPACE_SIZE = 4.47; // 20平米映射
 
@@ -25,7 +24,6 @@ function setup() {
     createCanvas(windowWidth, windowHeight).parent("sketch-container");
     myColor = color(random(255), random(255), random(255));
 
-    // 步骤 1：授权
     let authBtn = createButton("STEP 1: ENABLE SENSORS");
     authBtn.center();
     authBtn.style('padding', '20px');
@@ -52,7 +50,7 @@ function setup() {
 }
 
 function mousePressed() {
-    // 步骤 2：点击地图任意位置即开始
+    // 步骤 2：选点即开始
     if (gameState === 1) {
         myPos.x = mouseX / width;
         myPos.y = mouseY / height;
@@ -63,10 +61,13 @@ function mousePressed() {
         gameState = 3;
         return;
     } 
-    // 刷新球手动点击
+    
+    // 正式游戏：点击刷新球，仅触发探测脉冲，【不改变位置】
     if (gameState === 3) {
         let d = dist(mouseX, mouseY, width - 60, height - 60);
-        if (d < 45) triggerUpdate();
+        if (d < 45 && (millis() - lastMoveTime > refreshCooldown)) {
+            syncAndPulse(); 
+        }
     }
 }
 
@@ -74,19 +75,29 @@ function handleMotion(event) {
     if (gameState !== 3) return;
     let acc = event.accelerationIncludingGravity;
     if (!acc) return;
-    currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-    if (abs(currentAccel - lastAccel) > stepThreshold) triggerUpdate();
+    let currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+    let delta = abs(currentAccel - lastAccel);
+
+    // 只有真实行走才会【触发位移】
+    if (delta > stepThreshold) {
+        physicalStep(); 
+    }
     lastAccel = currentAccel;
 }
 
-function triggerUpdate() {
-    if (millis() - lastMoveTime < 500) return;
-    lastMoveTime = millis();
+// 逻辑 A：物理迈步（改变位置 + 同步）
+function physicalStep() {
     let stepSize = 0.05; 
     myPos.x += cos(radians(heading - 90)) * stepSize;
     myPos.y += sin(radians(heading - 90)) * stepSize;
     myPos.x = constrain(myPos.x, 0, 1);
     myPos.y = constrain(myPos.y, 0, 1);
+    syncAndPulse();
+}
+
+// 逻辑 B：同步与脉冲展示（位置不变）
+function syncAndPulse() {
+    lastMoveTime = millis();
     socket.emit("refresh-location", { 
         xpos: myPos.x, ypos: myPos.y, 
         color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
@@ -95,7 +106,6 @@ function triggerUpdate() {
 
 function draw() {
     image(mapImg, 0, 0, width, height);
-    
     if (gameState === 1) drawOverlay("STEP 2: TAP ONCE TO SET BASE & START");
     else if (gameState === 3) runGame();
 }
@@ -112,15 +122,15 @@ function runGame() {
     drawStars();
     drawRefreshBall();
     drawTimer();
-    drawLeaderboard(); 
+    drawLeaderboard();
 
     let elapsed = millis() - lastMoveTime;
     if (elapsed < 2000) drawPlayerUI(myPos.x * width, myPos.y * height, elapsed);
 }
 
-// 左侧 12px 极窄条
+// 1. 极窄进度条 (8像素)，实时更新不闪烁
 function drawDistanceBar(d) {
-    let barW = 12;
+    let barW = 8;
     let threshold = 0.5 / REAL_SPACE_SIZE;
     let h = map(d, 0, 0.8, height, 0);
     fill(d < threshold ? color(255, 0, 0) : color(255, 180));
@@ -128,16 +138,14 @@ function drawDistanceBar(d) {
     rect(0, height, barW, -h);
 }
 
-// 排行榜：黑底、白边、白字
+// 2. 排行榜
 function drawLeaderboard() {
     if (leaderboard.length === 0) return;
-    let x = 25; let y = 60;
+    let x = 20; let y = 65;
     let w = 150; let h = leaderboard.length * 25 + 10;
-
     push();
     fill(0); stroke(255); strokeWeight(1.5);
     rect(x, y, w, h, 5);
-    
     noStroke(); fill(255); textAlign(LEFT, TOP); textSize(13);
     for (let i = 0; i < leaderboard.length; i++) {
         let p = leaderboard[i];
@@ -149,11 +157,12 @@ function drawLeaderboard() {
     pop();
 }
 
+// 3. 刷新球
 function drawRefreshBall() {
     push(); translate(width - 60, height - 60);
     fill(20, 200); stroke(255, 50); circle(0, 0, 80);
     noFill(); stroke(0, 255, 180); strokeWeight(4);
-    if (millis() - lastMoveTime < 2000) {
+    if (millis() - lastMoveTime < refreshCooldown) {
         rotate(millis() * 0.01);
         arc(0, 0, 45, 45, 0, PI * 1.5);
     } else {
@@ -201,6 +210,6 @@ function drawPlayerUI(x, y, elapsed) {
 }
 
 function drawOverlay(txt) {
-    fill(0, 220); rect(0, height/2 - 50, width, 100);
+    fill(0, 220); rect(0, 0, width, height);
     fill(255); textAlign(CENTER, CENTER); textSize(16); text(txt, width/2, height/2);
 }
