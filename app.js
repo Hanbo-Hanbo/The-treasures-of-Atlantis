@@ -11,14 +11,12 @@ let gameTime = 300;
 let playerScores = {}; 
 
 function initMap() {
-    // 随机 5 颗星星
     treasures = Array.from({length: 5}, () => ({
         x: Math.random(), y: Math.random(), found: false, foundBy: null 
     }));
 }
 initMap();
 
-// 全局 5 分钟计时
 setInterval(() => {
     if (gameTime > 0) {
         gameTime--;
@@ -26,13 +24,14 @@ setInterval(() => {
     } else {
         gameTime = 300;
         initMap(); 
-        bases = []; 
+        bases = [];
         playerScores = {}; 
-        io.emit("game-reset"); // 通知所有客户端重置回 gameState 0
+        io.emit("game-reset"); // 5分钟到，强制所有人回到设置大本营状态
     }
 }, 1000);
 
 io.on("connection", (socket) => {
+    playerScores[socket.id] = { color: null, score: 0 };
     socket.emit("init-game", { treasures, bases, gameTime });
 
     socket.on("set-base", (d) => {
@@ -42,11 +41,13 @@ io.on("connection", (socket) => {
     });
 
     socket.on("refresh-location", (data) => {
+        // 占领大本营检测
         bases.forEach(b => {
             if (b.id !== socket.id && Math.hypot(data.xpos - b.x, data.ypos - b.y) < 0.1) {
                 b.color = data.color;
             }
         });
+        // 寻宝检测
         let scoreChanged = false;
         treasures.forEach(t => {
             if (!t.found && Math.hypot(data.xpos - t.x, data.ypos - t.y) < 0.08) {
@@ -61,7 +62,6 @@ io.on("connection", (socket) => {
         io.emit("update-treasures", treasures);
         io.emit("update-bases", bases);
     });
-    
     socket.on("disconnect", () => { delete playerScores[socket.id]; });
 });
 
