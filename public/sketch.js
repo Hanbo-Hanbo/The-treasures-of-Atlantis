@@ -9,12 +9,11 @@ let rawLat = "N/A", rawLon = "N/A", gpsAccuracy = "N/A";
 let osc = null; 
 let nextBeepTime = 0;
 
-// --- Tuning Parameters ---
+// --- Parameters ---
 const GAME_RANGE_METERS = 7.07; 
 const LERP_FACTOR = 0.05;       
-const MIN_ACCURACY = 20;        
-const JUMP_LIMIT = 0.15;        
-const KB_SPEED = 0.005; // PC movement speed per frame (approx 2m/s)
+const MIN_ACCURACY = 25; // Slightly relaxed for better initial lock
+const KB_SPEED = 0.005; 
 
 function preload() { mapImg = loadImage('map.jpg'); }
 
@@ -36,73 +35,101 @@ function setup() {
     socket.on("update-leaderboard", d => leaderboard = d || []);
     socket.on("timer-update", t => timeLeft = t);
     socket.on("game-over", data => { finalRanking = data || []; gameState = 4; });
-    socket.on("game-reset", () => { gameState = 0; startTime = millis(); originCoords = null; });
+    socket.on("game-reset", () => { 
+        gameState = 0; startTime = millis(); treasures = []; bases = []; 
+        leaderboard = []; finalRanking = []; originCoords = null;
+    });
 }
 
 function mousePressed() {
     if (gameState === 0) {
         if (typeof userStartAudio !== 'undefined') userStartAudio();
+        
+        // 1. Request GPS
         if ("geolocation" in navigator) {
-            navigator.geolocation.watchPosition(handleGPS, null, { enableHighAccuracy: true, maximumAge: 0 });
+            navigator.geolocation.watchPosition(handleGPS, (e) => console.log(e), { 
+                enableHighAccuracy: true, 
+                maximumAge: 0 
+            });
         }
+
+        // 2. Request Compass Permission (Crucial for iOS)
         if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
             DeviceOrientationEvent.requestPermission().then(res => {
                 if (res === 'granted') {
-                    window.addEventListener('deviceorientation', e => { heading = e.webkitCompassHeading || e.alpha || 0; }, true);
+                    window.addEventListener('deviceorientation', (e) => {
+                        // Use webkitCompassHeading for iOS, alpha for others
+                        heading = e.webkitCompassHeading || (360 - e.alpha);
+                    }, true);
                 }
             });
+        } else {
+            window.addEventListener('deviceorientation', (e) => {
+                heading = e.webkitCompassHeading || (360 - e.alpha);
+            }, true);
         }
+
+        // 3. Set Base and Start
         targetPos.x = mouseX / width; targetPos.y = mouseY / height;
         myPos.x = targetPos.x; myPos.y = targetPos.y;
-        socket.emit("set-base", { x: targetPos.x, y: targetPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
+        
+        socket.emit("set-base", { 
+            x: targetPos.x, y: targetPos.y, 
+            color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
+        });
+        
         gameState = 3; startTime = millis();
         return false;
     }
 }
 
 function handleGPS(position) {
-    if (gameState !== 3) return;
     let lat = position.coords.latitude;
     let lon = position.coords.longitude;
     let acc = position.coords.accuracy;
     rawLat = lat.toFixed(6); rawLon = lon.toFixed(6); gpsAccuracy = acc.toFixed(1) + "m";
 
+    if (gameState !== 3) return;
     if (acc > MIN_ACCURACY) return;
+
+    // Use current location as center if not yet defined
     if (!originCoords) originCoords = { lat, lon };
 
     let deltaY = (lat - originCoords.lat) * 111320;
     let deltaX = (lon - originCoords.lon) * (111320 * cos(radians(lat)));
+
     let nx = constrain(0.5 + (deltaX / GAME_RANGE_METERS), 0.01, 0.99);
     let ny = constrain(0.5 - (deltaY / GAME_RANGE_METERS), 0.01, 0.99);
 
-    if (dist(targetPos.x, targetPos.y, nx, ny) < JUMP_LIMIT) {
-        targetPos.x = nx; targetPos.y = ny;
-    }
+    // Apply coordinate update
+    targetPos.x = nx; targetPos.y = ny;
+    sync();
 }
 
-// --- NEW: PC Keyboard Controls ---
 function handleKeyboard() {
     if (gameState !== 3) return;
     let moved = false;
-    if (keyIsDown(87) || keyIsDown(UP_ARROW)) { targetPos.y -= KB_SPEED; moved = true; }    // W
-    if (keyIsDown(83) || keyIsDown(DOWN_ARROW)) { targetPos.y += KB_SPEED; moved = true; }  // S
-    if (keyIsDown(65) || keyIsDown(LEFT_ARROW)) { targetPos.x -= KB_SPEED; moved = true; }  // A
-    if (keyIsDown(68) || keyIsDown(RIGHT_ARROW)) { targetPos.x += KB_SPEED; moved = true; } // D
-
+    if (keyIsDown(87) || keyIsDown(UP_ARROW)) { targetPos.y -= KB_SPEED; moved = true; } 
+    if (keyIsDown(83) || keyIsDown(DOWN_ARROW)) { targetPos.y += KB_SPEED; moved = true; }
+    if (keyIsDown(65) || keyIsDown(LEFT_ARROW)) { targetPos.x -= KB_SPEED; moved = true; }
+    if (keyIsDown(68) || keyIsDown(RIGHT_ARROW)) { targetPos.x += KB_SPEED; moved = true; }
     if (moved) {
         targetPos.x = constrain(targetPos.x, 0.01, 0.99);
         targetPos.y = constrain(targetPos.y, 0.01, 0.99);
-        sync(); // Update other players
+        sync();
     }
 }
 
 function sync() {
-    socket.emit("refresh-location", { xpos: myPos.x, ypos: myPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
+    socket.emit("refresh-location", { 
+        xpos: myPos.x, ypos: myPos.y, 
+        color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
+    });
 }
 
 function draw() {
     background(0);
-    if (gameState === 3) handleKeyboard(); // Check keyboard every frame
+    if (gameState === 3) handleKeyboard();
 
     myPos.x = lerp(myPos.x, targetPos.x, LERP_FACTOR);
     myPos.y = lerp(myPos.y, targetPos.y, LERP_FACTOR);
@@ -110,20 +137,13 @@ function draw() {
     if (mapImg) image(mapImg, 0, 0, width, height);
 
     if (gameState === 0) {
-        drawOverlay("TAP TO START\n(Mobile: GPS | PC: WASD)");
+        drawOverlay("TAP TO SET BASE & START\n(Ensure GPS is on)");
     } else if (gameState === 3) {
         runGameSession();
         drawDiagnosticInfo(); 
     } else if (gameState === 4) {
         if (osc) osc.amp(0); drawGameOverTable();
     }
-}
-
-function drawDiagnosticInfo() {
-    push(); textAlign(LEFT, BOTTOM); textSize(10);
-    fill(parseFloat(gpsAccuracy) > MIN_ACCURACY ? color(255, 0, 0) : color(0, 255, 0));
-    text(`GPS: ${rawLat}, ${rawLon} | ACC: ${gpsAccuracy}`, 15, height - 15);
-    pop();
 }
 
 function runGameSession() {
@@ -136,7 +156,9 @@ function runGameSession() {
     }
     handleAudioFeedback(minDist);
     drawDistanceBar(minDist);
-    drawBases(); drawStars(); drawTimer(); drawLeaderboard();
+    drawBases(); // Ensure bases are rendered
+    drawStars(); drawTimer(); drawLeaderboard();
+    
     for (let id in allPlayers) {
         let p = allPlayers[id];
         if (p && p.color) drawPlayerMarker(p.x * width, p.y * height, p.color, id === socket.id);
@@ -158,19 +180,47 @@ function drawPlayerMarker(x, y, col, isMe) {
     push(); translate(x, y); 
     fill(col.r, col.g, col.b); stroke(255); strokeWeight(isMe ? 3 : 1);
     circle(0, 0, 18);
+    
     if (isMe) {
-        push(); rotate(radians(heading || 0)); stroke(255, 0, 0); strokeWeight(2); line(0, 0, 0, -22);
-        fill(255, 0, 0); noStroke(); triangle(-4, -16, 4, -16, 0, -24); pop();
-        noFill(); stroke(255, 120); ellipse(0, 0, 38, 38);
+        // Compass Needle Logic
+        push();
+        rotate(radians(heading || 0));
+        stroke(255, 0, 0); strokeWeight(2.5);
+        line(0, 0, 0, -22); // North pointer
+        fill(255, 0, 0); noStroke();
+        triangle(-5, -16, 5, -16, 0, -26); 
+        pop();
+        
+        noFill(); stroke(255, 150); ellipse(0, 0, 38, 38);
+        fill(255); textAlign(CENTER); textSize(10); text("YOU", 0, 30);
     }
     pop();
 }
 
-// Visual UI components remain unchanged
+function drawBases() {
+    if (!bases) return;
+    bases.forEach(b => {
+        push(); translate(b.x * width, b.y * height);
+        fill(b.color.r, b.color.g, b.color.b); stroke(255); strokeWeight(1.5);
+        rectMode(CENTER);
+        // House Shape
+        rect(0, 5, 24, 18); // Base
+        triangle(-16, 5, 0, -14, 16, 5); // Roof
+        pop();
+    });
+}
+
+function drawDiagnosticInfo() {
+    push(); textAlign(LEFT, BOTTOM); textSize(9);
+    fill(255, 120);
+    text(`GPS: ${rawLat}, ${rawLon} | ACC: ${gpsAccuracy} | DIR: ${floor(heading)}°`, 15, height - 15);
+    pop();
+}
+
+// Visual Helpers
 function drawDistanceBar(d) { let barW = 8; fill(d < (0.5/GAME_RANGE_METERS) ? color(255, 0, 0) : color(255, 180)); noStroke(); rect(0, height, barW, -map(d, 0, 0.8, height, 0)); }
 function drawLeaderboard() { if (!leaderboard || leaderboard.length === 0) return; push(); fill(0, 200); stroke(255); strokeWeight(1); rect(20, 65, 150, leaderboard.length * 25 + 10, 5); noStroke(); fill(255); textAlign(LEFT, TOP); textSize(12); leaderboard.forEach((p, i) => { if(p.color) { fill(p.color.r, p.color.g, p.color.b); circle(35, 78 + i * 25, 10); fill(255); text(`Rank ${i+1}: ${p.score} ⭐`, 50, 72 + i * 25); } }); pop(); }
 function drawTimer() { fill(0, 150); rect(width/2 - 50, 15, 100, 35, 8); fill(255); textAlign(CENTER, CENTER); text(timeLeft < 0 ? "0:00" : `${floor(timeLeft/60)}:${nf(timeLeft%60, 2)}`, width/2, 32); }
-function drawBases() { if(bases) bases.forEach(b => { push(); translate(b.x*width, b.y*height); fill(b.color.r, b.color.g, b.color.b); stroke(255); rectMode(CENTER); rect(0, 5, 22, 16); triangle(-14, 5, 0, -12, 14, 5); pop(); }); }
 function drawStars() { if(treasures) treasures.forEach(t => { if (t.found) { push(); translate(t.x*width, t.y*height); fill(t.foundBy.r, t.foundBy.g, t.foundBy.b); noStroke(); beginShape(); for(let i=0; i<10; i++){ let r=(i%2==0)?10:5; vertex(r*cos(TWO_PI*i/10), r*sin(TWO_PI*i/10)); } endShape(CLOSE); pop(); } }); }
 function drawOverlay(t) { fill(0, 220); rect(0, 0, width, height); fill(255); textAlign(CENTER); text(t, width/2, height/2); }
 function drawGameOverTable() { fill(0, 240); rect(0, 0, width, height); push(); fill(0); stroke(255); strokeWeight(2); rect(width/2 - 110, height/2 - 150, 220, 300, 10); noStroke(); fill(255); textAlign(CENTER); textSize(22); text("GAME OVER", width/2, height/2 - 110); textSize(13); text("FINAL SCORES", width/2, height/2 - 80); textAlign(LEFT); finalRanking.forEach((p, i) => { if(p.color){ fill(p.color.r, p.color.g, p.color.b); circle(width/2 - 70, height/2 - 40 + i * 35, 10); fill(255); text(`${i+1}. ${p.score} Stars`, width/2 - 50, height/2 - 36 + i * 35); } }); pop(); }
