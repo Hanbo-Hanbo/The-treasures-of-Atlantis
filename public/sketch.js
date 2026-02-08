@@ -2,11 +2,14 @@ let socket, myPos = { x: 0.5, y: 0.5 }, treasures = [], bases = [], leaderboard 
 let myColor, mapImg, heading = 0, timeLeft = 300;
 let gameState = 0, lastPulseTime = -2000, lastAccel = 0, startTime;
 
-// --- 灵敏度极限调优 ---
-const STEP_THRES = 1.0; // 进一步降低到 1.0，几乎是只要手机晃动就判定
-const STEP_VAL = 0.03;  // 增加位移感
+// --- 调优参数 ---
+const REAL_SIZE = 4.47; 
+const STEP_THRES = 1.0; 
+const STEP_VAL = 0.03;
 
-function preload() { mapImg = loadImage('map.jpg'); }
+function preload() { 
+    mapImg = loadImage('map.jpg'); 
+}
 
 function setup() {
     socket = io();
@@ -14,63 +17,59 @@ function setup() {
     myColor = color(random(255), random(255), random(255));
     startTime = millis();
 
-    socket.on("init-game", d => { treasures = d.treasures; bases = d.bases; timeLeft = d.gameTime; });
-    socket.on("update-treasures", d => treasures = d);
-    socket.on("update-bases", d => bases = d);
-    socket.on("update-leaderboard", d => leaderboard = d);
-    socket.on("timer-update", t => timeLeft = t);
-    socket.on("game-reset", () => { gameState = 0; startTime = millis(); treasures = []; bases = []; });
+    // 监听数据，确保数据始终是数组，防止 forEach 报错
+    socket.on("init-game", d => { treasures = d.treasures || []; bases = d.bases || []; timeLeft = d.gameTime || 300; });
+    socket.on("update-treasures", d => { treasures = d || []; });
+    socket.on("update-bases", d => { bases = d || []; });
+    socket.on("update-leaderboard", d => { leaderboard = d || []; });
+    socket.on("timer-update", t => { timeLeft = t; });
+    
+    socket.on("game-reset", () => { 
+        gameState = 0; 
+        startTime = millis(); 
+        treasures = []; bases = []; leaderboard = [];
+    });
 }
 
-// 核心：点击即授权
 function mousePressed() {
-    // 步骤 2：选点并【强制请求权限】
+    // 状态 0: 必须先完成权限和位置初始化
     if (gameState === 0) {
-        // 1. 立即尝试请求 iOS 权限
-        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-            // 这是 iOS 13+ 的标准流程，必须写在 mousePressed 的第一行
+        // 强制申请权限
+        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
             DeviceOrientationEvent.requestPermission()
-                .then(permissionState => {
-                    if (permissionState === 'granted') {
-                        window.addEventListener('deviceorientation', (e) => {
-                            heading = e.webkitCompassHeading || e.alpha;
-                        });
-                        // 链式请求运动权限
+                .then(oState => {
+                    if (oState === 'granted') {
+                        window.addEventListener('deviceorientation', e => { heading = e.webkitCompassHeading || e.alpha; });
                         return DeviceMotionEvent.requestPermission();
                     }
                 })
-                .then(motionState => {
-                    if (motionState === 'granted') {
+                .then(mState => {
+                    if (mState === 'granted') {
                         window.addEventListener('devicemotion', handleMotion, true);
                     }
                 })
-                .catch(err => console.log("Sensor error: " + err));
+                .catch(e => console.error("Permission denied: ", e));
         } else {
-            // 安卓或非 iOS 设备
+            // 非 iOS 或 PC 端测试
             window.addEventListener('devicemotion', handleMotion, true);
-            window.addEventListener('deviceorientation', (e) => {
-                heading = e.webkitCompassHeading || e.alpha;
-            }, true);
+            window.addEventListener('deviceorientation', e => { heading = e.webkitCompassHeading || e.alpha; });
         }
 
-        // 2. 设置位置
+        // 绑定大本营
         myPos.x = mouseX / width;
         myPos.y = mouseY / height;
-        socket.emit("set-base", { 
-            x: myPos.x, y: myPos.y, 
-            color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
-        });
+        socket.emit("set-base", { x: myPos.x, y: myPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
         
-        gameState = 3;
+        gameState = 3; 
         startTime = millis();
         lastPulseTime = millis();
         return false;
     }
 
-    // 正式游戏：点击只发探测脉冲，不改变位置
+    // 状态 3: 手动刷新雷达
     if (gameState === 3) {
         let d = dist(mouseX, mouseY, width - 60, height - 60);
-        if (d < 45 && (millis() - lastPulseTime > 1500)) {
+        if (d < 45 && (millis() - lastPulseTime > 1000)) {
             lastPulseTime = millis();
             sync();
         }
@@ -86,7 +85,6 @@ function handleMotion(e) {
     let current = sqrt(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
     let delta = abs(current - lastAccel);
 
-    // 只要有轻微步伐波动就位移
     if (delta > STEP_THRES) {
         myPos.x += cos(radians(heading - 90)) * STEP_VAL;
         myPos.y += sin(radians(heading - 90)) * STEP_VAL;
@@ -98,55 +96,71 @@ function handleMotion(e) {
 }
 
 function sync() {
-    socket.emit("refresh-location", { 
-        xpos: myPos.x, ypos: myPos.y, 
-        color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
-    });
+    socket.emit("refresh-location", { xpos: myPos.x, ypos: myPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
 }
 
 function draw() {
+    background(0); // 兜底背景
     image(mapImg, 0, 0, width, height);
-    if (gameState === 0) { 
-        drawOverlay("TAP ANYWHERE TO START\n(Ensure HTTPS is used)"); 
+    
+    if (gameState === 0) {
+        drawOverlay("TAP ANYWHERE TO START\n(Please use Safari on iOS)");
     } else {
         runGameSession();
+        // 5秒提示逻辑
         let ts = millis() - startTime;
         if (ts < 5000) drawFadingTip("BASE DEPLOYED!", map(ts, 4000, 5000, 255, 0));
     }
+
+    // 调试信息（如果屏幕还是没 UI，看这里有没有文字）
+    fill(255, 100);
+    noStroke();
+    textSize(10);
+    textAlign(LEFT);
+    text(`S: ${socket.connected ? 'OK' : 'ERR'} | G: ${gameState} | H: ${floor(heading)}`, 15, height - 10);
 }
 
 function runGameSession() {
+    // 增加数据存在性检查
     let minDist = 1.0;
-    treasures.filter(t => !t.found).forEach(t => {
-        let d = dist(myPos.x, myPos.y, t.x, t.y);
-        if (d < minDist) minDist = d;
-    });
+    if (treasures && treasures.length > 0) {
+        treasures.filter(t => !t.found).forEach(t => {
+            let d = dist(myPos.x, myPos.y, t.x, t.y);
+            if (d < minDist) minDist = d;
+        });
+    }
 
     drawDistanceBar(minDist);
-    drawBases(); drawStars(); drawRefreshBall(); drawTimer(); drawLeaderboard();
+    drawBases(); 
+    drawStars(); 
+    drawRefreshBall(); 
+    drawTimer(); 
+    drawLeaderboard();
+
     let el = millis() - lastPulseTime;
     if (el < 2000) drawPlayerUI(myPos.x * width, myPos.y * height, el);
 }
 
-// 排行榜：黑底白描边
-function drawLeaderboard() {
-    if (leaderboard.length === 0) return;
-    push(); fill(0); stroke(255); strokeWeight(1);
-    rect(20, 65, 150, leaderboard.length * 25 + 10, 5);
-    noStroke(); fill(255); textAlign(LEFT, TOP); textSize(13);
-    leaderboard.forEach((p, i) => {
-        fill(p.color.r, p.color.g, p.color.b); circle(35, 78 + i * 25, 10);
-        fill(255); text(`Rank ${i+1}: ${p.score} ⭐`, 50, 72 + i * 25);
-    });
-    pop();
-}
-
-// 侧边 8px 窄条
+// UI 绘制组件
 function drawDistanceBar(d) {
     let barW = 8;
     fill(d < (0.5/REAL_SIZE) ? color(255, 0, 0) : color(255, 180));
     noStroke();
     rect(0, height, barW, -map(d, 0, 0.8, height, 0));
+}
+
+function drawLeaderboard() {
+    if (!leaderboard || leaderboard.length === 0) return;
+    push(); fill(0, 180); stroke(255); strokeWeight(1);
+    rect(20, 65, 150, leaderboard.length * 25 + 10, 5);
+    noStroke(); fill(255); textAlign(LEFT, TOP); textSize(13);
+    leaderboard.forEach((p, i) => {
+        if(p && p.color) {
+            fill(p.color.r, p.color.g, p.color.b); circle(35, 78 + i * 25, 10);
+            fill(255); text(`Rank ${i+1}: ${p.score} ⭐`, 50, 72 + i * 25);
+        }
+    });
+    pop();
 }
 
 function drawRefreshBall() {
@@ -156,16 +170,15 @@ function drawRefreshBall() {
     if (millis() - lastPulseTime < 2000) { rotate(millis() * 0.01); arc(0, 0, 45, 45, 0, PI * 1.5); }
     else { 
         circle(0, 0, 45); 
-        // 调试指示：红色代表感应到震动
-        fill(abs(accelerationX + accelerationY) > 0.3 ? color(255, 0, 0) : color(0, 255, 180));
+        fill(abs(accelerationX) > 0.5 ? color(255, 0, 0) : color(0, 255, 180));
         circle(0, 0, 10); 
     }
     pop();
 }
 
 function drawTimer() { fill(0, 150); rect(width/2 - 50, 15, 100, 35, 8); fill(255); textAlign(CENTER, CENTER); text(`${floor(timeLeft/60)}:${nf(timeLeft%60, 2)}`, width/2, 32); }
-function drawBases() { bases.forEach(b => { push(); translate(b.x*width, b.y*height); fill(b.color.r, b.color.g, b.color.b); stroke(255); rectMode(CENTER); rect(0, 5, 22, 16); triangle(-14, 5, 0, -12, 14, 5); pop(); }); }
-function drawStars() { treasures.forEach(t => { if (t.found) { push(); translate(t.x*width, t.y*height); fill(t.foundBy.r, t.foundBy.g, t.foundBy.b); noStroke(); beginShape(); for(let i=0; i<10; i++){ let r=(i%2==0)?10:5; vertex(r*cos(TWO_PI*i/10), r*sin(TWO_PI*i/10)); } endShape(CLOSE); pop(); } }); }
+function drawBases() { if(bases) bases.forEach(b => { push(); translate(b.x*width, b.y*height); fill(b.color.r, b.color.g, b.color.b); stroke(255); rectMode(CENTER); rect(0, 5, 22, 16); triangle(-14, 5, 0, -12, 14, 5); pop(); }); }
+function drawStars() { if(treasures) treasures.forEach(t => { if (t.found) { push(); translate(t.x*width, t.y*height); fill(t.foundBy.r, t.foundBy.g, t.foundBy.b); noStroke(); beginShape(); for(let i=0; i<10; i++){ let r=(i%2==0)?10:5; vertex(r*cos(TWO_PI*i/10), r*sin(TWO_PI*i/10)); } endShape(CLOSE); pop(); } }); }
 function drawPlayerUI(x, y, e) { let a = map(e, 0, 2000, 255, 0); push(); translate(x, y); noFill(); stroke(255, a*0.5); ellipse(0,0,30,30); line(-12,0,12,0); line(0,-12,0,12); stroke(255,0,0, a); line(0,0,0,-16); fill(red(myColor), green(myColor), blue(myColor), a); noStroke(); circle(0,0,15); pop(); }
 function drawOverlay(t) { fill(0, 220); rect(0, 0, width, height); fill(255); textAlign(CENTER); text(t, width/2, height/2); }
 function drawFadingTip(t, a) { fill(0, a*0.6); rect(0, height-100, width, 50); fill(255, a); textAlign(CENTER); text(t, width/2, height-75); }
