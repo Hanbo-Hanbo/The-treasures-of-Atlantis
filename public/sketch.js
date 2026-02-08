@@ -4,14 +4,16 @@ let allPlayers = {}, myColor, mapImg, timeLeft = 300;
 let gameState = 0, startTime, originCoords = null;
 let heading = 0; 
 
-// --- Debugging Raw Data ---
+// --- Debugging & Anti-Teleport ---
 let rawLat = "N/A", rawLon = "N/A", gpsAccuracy = "N/A";
-
 let osc = null; 
 let nextBeepTime = 0;
 
-const GAME_RANGE_METERS = 7.07; 
-const LERP_FACTOR = 0.08;       
+// --- Tuning Parameters ---
+const GAME_RANGE_METERS = 7.07; // 50m2 area
+const LERP_FACTOR = 0.05;       // Smoother sliding (lowered for more stability)
+const MIN_ACCURACY = 20;        // Ignore GPS data if accuracy > 20 meters
+const JUMP_LIMIT = 0.15;        // Max allowed move per GPS update (prevents teleporting)
 
 function preload() { mapImg = loadImage('map.jpg'); }
 
@@ -40,13 +42,11 @@ function mousePressed() {
         if (typeof userStartAudio !== 'undefined') userStartAudio();
 
         if ("geolocation" in navigator) {
-            // 核心修复：强制高精度模式
-            navigator.geolocation.watchPosition(handleGPS, 
-                (err) => { rawLat = "ERR: " + err.code; }, 
-                { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
-            );
-        } else {
-            rawLat = "NOT SUPPORTED";
+            navigator.geolocation.watchPosition(handleGPS, null, { 
+                enableHighAccuracy: true, 
+                maximumAge: 0, 
+                timeout: 10000 
+            });
         }
         
         if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
@@ -66,28 +66,42 @@ function mousePressed() {
 }
 
 function handleGPS(position) {
-    // 捕获原始数据用于诊断
-    rawLat = position.coords.latitude.toFixed(6);
-    rawLon = position.coords.longitude.toFixed(6);
-    gpsAccuracy = position.coords.accuracy.toFixed(1) + "m";
-
-    if (gameState !== 3) return;
     let lat = position.coords.latitude;
     let lon = position.coords.longitude;
-    
+    let acc = position.coords.accuracy;
+
+    // Debug Info
+    rawLat = lat.toFixed(6);
+    rawLon = lon.toFixed(6);
+    gpsAccuracy = acc.toFixed(1) + "m";
+
+    if (gameState !== 3) return;
+
+    // --- ANTI-TELEPORT FILTER ---
+    // 1. Accuracy Filter: If signal is too weak, ignore it
+    if (acc > MIN_ACCURACY) return;
+
     if (!originCoords) originCoords = { lat, lon };
 
     let deltaY = (lat - originCoords.lat) * 111320;
     let deltaX = (lon - originCoords.lon) * (111320 * cos(radians(lat)));
 
-    targetPos.x = constrain(0.5 + (deltaX / GAME_RANGE_METERS), 0.01, 0.99);
-    targetPos.y = constrain(0.5 - (deltaY / GAME_RANGE_METERS), 0.01, 0.99);
+    let newTargetX = constrain(0.5 + (deltaX / GAME_RANGE_METERS), 0.01, 0.99);
+    let newTargetY = constrain(0.5 - (deltaY / GAME_RANGE_METERS), 0.01, 0.99);
+
+    // 2. Distance Jump Filter: If the change is too huge (teleport), ignore it
+    let moveDist = dist(targetPos.x, targetPos.y, newTargetX, newTargetY);
+    if (moveDist < JUMP_LIMIT) {
+        targetPos.x = newTargetX;
+        targetPos.y = newTargetY;
+    }
     
     socket.emit("refresh-location", { xpos: myPos.x, ypos: myPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
 }
 
 function draw() {
     background(0);
+    // Smoother interpolation
     myPos.x = lerp(myPos.x, targetPos.x, LERP_FACTOR);
     myPos.y = lerp(myPos.y, targetPos.y, LERP_FACTOR);
 
@@ -97,7 +111,7 @@ function draw() {
         drawOverlay("TAP TO START");
     } else if (gameState === 3) {
         runGameSession();
-        drawDiagnosticInfo(); // 红色实时诊断文字
+        drawDiagnosticInfo(); 
     } else if (gameState === 4) {
         if (osc) osc.amp(0); 
         drawGameOverTable();
@@ -106,17 +120,14 @@ function draw() {
 
 function drawDiagnosticInfo() {
     push();
-    textAlign(LEFT, BOTTOM);
-    textSize(10);
-    // 如果数字是红色的且在变，说明传感器正常
-    fill(255, 0, 0); 
-    text(`RAW LAT: ${rawLat}`, 15, height - 45);
-    text(`RAW LON: ${rawLon}`, 15, height - 30);
-    text(`ACCURACY: ${gpsAccuracy}`, 15, height - 15);
+    textAlign(LEFT, BOTTOM); textSize(10);
+    // Green if GPS is stable, Red if jumping/weak
+    fill(parseFloat(gpsAccuracy) > MIN_ACCURACY ? color(255, 0, 0) : color(0, 255, 0));
+    text(`RAW: ${rawLat}, ${rawLon}`, 15, height - 30);
+    text(`ACCURACY: ${gpsAccuracy} (Limit: ${MIN_ACCURACY}m)`, 15, height - 15);
     pop();
 }
 
-// --- 其余 UI 函数保持不变 ---
 function runGameSession() {
     let minDist = 1.0;
     if (treasures) {
@@ -134,29 +145,32 @@ function runGameSession() {
     }
 }
 
+// Sound Feedback
 function handleAudioFeedback(d) {
     if (!osc || d > 0.5) return; 
-    let interval = map(d, 0, 0.5, 100, 1200); 
-    let freq = map(d, 0, 0.5, 880, 220); 
+    let interval = map(d, 0, 0.5, 120, 1500); 
+    let freq = map(d, 0, 0.5, 900, 250); 
     if (millis() > nextBeepTime) {
-        osc.freq(freq); osc.amp(0.2, 0.05);
-        setTimeout(() => { if(osc) osc.amp(0, 0.1); }, 80);
+        osc.freq(freq); osc.amp(0.25, 0.05);
+        setTimeout(() => { if(osc) osc.amp(0, 0.1); }, 100);
         nextBeepTime = millis() + interval;
     }
 }
 
+// Player with Compass Needle
 function drawPlayerMarker(x, y, col, isMe) {
     push(); translate(x, y); 
     fill(col.r, col.g, col.b); stroke(255); strokeWeight(isMe ? 3 : 1);
     circle(0, 0, 18);
     if (isMe) {
-        push(); rotate(radians(heading || 0)); stroke(255, 0, 0); strokeWeight(2); line(0, 0, 0, -20);
-        fill(255, 0, 0); noStroke(); triangle(-4, -15, 4, -15, 0, -22); pop();
-        noFill(); stroke(255, 100); ellipse(0, 0, 35, 35);
+        push(); rotate(radians(heading || 0)); stroke(255, 0, 0); strokeWeight(2); line(0, 0, 0, -22);
+        fill(255, 0, 0); noStroke(); triangle(-4, -16, 4, -16, 0, -24); pop();
+        noFill(); stroke(255, 120); ellipse(0, 0, 38, 38);
     }
     pop();
 }
 
+// UI Components
 function drawDistanceBar(d) { let barW = 8; fill(d < (0.5/GAME_RANGE_METERS) ? color(255, 0, 0) : color(255, 180)); noStroke(); rect(0, height, barW, -map(d, 0, 0.8, height, 0)); }
 function drawLeaderboard() { if (!leaderboard || leaderboard.length === 0) return; push(); fill(0, 200); stroke(255); strokeWeight(1); rect(20, 65, 150, leaderboard.length * 25 + 10, 5); noStroke(); fill(255); textAlign(LEFT, TOP); textSize(12); leaderboard.forEach((p, i) => { if(p.color) { fill(p.color.r, p.color.g, p.color.b); circle(35, 78 + i * 25, 10); fill(255); text(`Rank ${i+1}: ${p.score} ⭐`, 50, 72 + i * 25); } }); pop(); }
 function drawTimer() { fill(0, 150); rect(width/2 - 50, 15, 100, 35, 8); fill(255); textAlign(CENTER, CENTER); text(timeLeft < 0 ? "0:00" : `${floor(timeLeft/60)}:${nf(timeLeft%60, 2)}`, width/2, 32); }
