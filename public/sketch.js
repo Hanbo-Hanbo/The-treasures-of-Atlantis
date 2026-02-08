@@ -1,11 +1,10 @@
 let socket, myPos = { x: 0.5, y: 0.5 }, treasures = [], bases = [], leaderboard = [];
 let myColor, mapImg, heading = 0, timeLeft = 300;
-let gameState = 0, lastPulseTime = -2000, lastAccel = 0, startTime, tipAlpha = 255;
+let gameState = 0, lastPulseTime = -2000, lastAccel = 0, startTime;
 
 // --- 灵敏度极限调优 ---
-const REAL_SIZE = 4.47; 
-const STEP_THRES = 1.2; // 极高灵敏度：捕捉轻微步伐
-const STEP_VAL = 0.025; // 略微增加单步距离，20平米感官更明显
+const STEP_THRES = 1.0; // 进一步降低到 1.0，几乎是只要手机晃动就判定
+const STEP_VAL = 0.03;  // 增加位移感
 
 function preload() { mapImg = loadImage('map.jpg'); }
 
@@ -20,38 +19,63 @@ function setup() {
     socket.on("update-bases", d => bases = d);
     socket.on("update-leaderboard", d => leaderboard = d);
     socket.on("timer-update", t => timeLeft = t);
-    socket.on("game-reset", () => { 
-        gameState = 0; startTime = millis(); treasures = []; bases = []; leaderboard = [];
-        myPos = {x:0.5, y:0.5}; 
-    });
+    socket.on("game-reset", () => { gameState = 0; startTime = millis(); treasures = []; bases = []; });
 }
 
+// 核心：点击即授权
 function mousePressed() {
+    // 步骤 2：选点并【强制请求权限】
     if (gameState === 0) {
-        if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-            DeviceMotionEvent.requestPermission().then(res => {
-                if (res === 'granted') {
-                    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-                        DeviceOrientationEvent.requestPermission().then(oRes => { if(oRes === 'granted') initSensors(); });
-                    } else { initSensors(); }
-                }
-            });
-        } else { initSensors(); }
-        myPos.x = mouseX / width; myPos.y = mouseY / height;
-        socket.emit("set-base", { x: myPos.x, y: myPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
-        gameState = 3; startTime = millis(); lastPulseTime = millis();
+        // 1. 立即尝试请求 iOS 权限
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+            // 这是 iOS 13+ 的标准流程，必须写在 mousePressed 的第一行
+            DeviceOrientationEvent.requestPermission()
+                .then(permissionState => {
+                    if (permissionState === 'granted') {
+                        window.addEventListener('deviceorientation', (e) => {
+                            heading = e.webkitCompassHeading || e.alpha;
+                        });
+                        // 链式请求运动权限
+                        return DeviceMotionEvent.requestPermission();
+                    }
+                })
+                .then(motionState => {
+                    if (motionState === 'granted') {
+                        window.addEventListener('devicemotion', handleMotion, true);
+                    }
+                })
+                .catch(err => console.log("Sensor error: " + err));
+        } else {
+            // 安卓或非 iOS 设备
+            window.addEventListener('devicemotion', handleMotion, true);
+            window.addEventListener('deviceorientation', (e) => {
+                heading = e.webkitCompassHeading || e.alpha;
+            }, true);
+        }
+
+        // 2. 设置位置
+        myPos.x = mouseX / width;
+        myPos.y = mouseY / height;
+        socket.emit("set-base", { 
+            x: myPos.x, y: myPos.y, 
+            color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
+        });
+        
+        gameState = 3;
+        startTime = millis();
+        lastPulseTime = millis();
         return false;
     }
+
+    // 正式游戏：点击只发探测脉冲，不改变位置
     if (gameState === 3) {
         let d = dist(mouseX, mouseY, width - 60, height - 60);
-        if (d < 45 && (millis() - lastPulseTime > 1500)) { lastPulseTime = millis(); sync(); }
+        if (d < 45 && (millis() - lastPulseTime > 1500)) {
+            lastPulseTime = millis();
+            sync();
+        }
     }
     return false;
-}
-
-function initSensors() {
-    window.addEventListener('devicemotion', handleMotion, true);
-    window.addEventListener('deviceorientation', e => { heading = e.webkitCompassHeading || e.alpha; }, true);
 }
 
 function handleMotion(e) {
@@ -59,11 +83,10 @@ function handleMotion(e) {
     let acc = e.accelerationIncludingGravity;
     if (!acc) return;
     
-    // 计算当前综合重力加速度：G = \sqrt{ax^2 + ay^2 + az^2}
     let current = sqrt(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
     let delta = abs(current - lastAccel);
 
-    // 只有当波动 delta > 1.2 时才判定为有效步伐
+    // 只要有轻微步伐波动就位移
     if (delta > STEP_THRES) {
         myPos.x += cos(radians(heading - 90)) * STEP_VAL;
         myPos.y += sin(radians(heading - 90)) * STEP_VAL;
@@ -75,36 +98,37 @@ function handleMotion(e) {
 }
 
 function sync() {
-    socket.emit("refresh-location", { xpos: myPos.x, ypos: myPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
+    socket.emit("refresh-location", { 
+        xpos: myPos.x, ypos: myPos.y, 
+        color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
+    });
 }
 
 function draw() {
     image(mapImg, 0, 0, width, height);
-    if (gameState === 0) { drawOverlay("TAP ONCE TO SET BASE & START"); } 
-    else {
-        let minDist = 1.0;
-        treasures.filter(t => !t.found).forEach(t => {
-            let d = dist(myPos.x, myPos.y, t.x, t.y);
-            if (d < minDist) minDist = d;
-        });
-        drawDistanceBar(minDist);
-        drawBases(); drawStars(); drawRefreshBall(); drawTimer(); drawLeaderboard();
-        let elapsed = millis() - lastPulseTime;
-        if (elapsed < 2000) drawPlayerUI(myPos.x * width, myPos.y * height, elapsed);
-        let timeStart = millis() - startTime;
-        if (timeStart < 5000) drawFadingTip("BASE DEPLOYED!", map(timeStart, 4000, 5000, 255, 0));
+    if (gameState === 0) { 
+        drawOverlay("TAP ANYWHERE TO START\n(Ensure HTTPS is used)"); 
+    } else {
+        runGameSession();
+        let ts = millis() - startTime;
+        if (ts < 5000) drawFadingTip("BASE DEPLOYED!", map(ts, 4000, 5000, 255, 0));
     }
 }
 
-// 侧边 8px 窄条
-function drawDistanceBar(d) {
-    let barW = 8;
-    fill(d < (0.5/REAL_SIZE) ? color(255, 0, 0) : color(255, 180));
-    noStroke();
-    rect(0, height, barW, -map(d, 0, 0.8, height, 0));
+function runGameSession() {
+    let minDist = 1.0;
+    treasures.filter(t => !t.found).forEach(t => {
+        let d = dist(myPos.x, myPos.y, t.x, t.y);
+        if (d < minDist) minDist = d;
+    });
+
+    drawDistanceBar(minDist);
+    drawBases(); drawStars(); drawRefreshBall(); drawTimer(); drawLeaderboard();
+    let el = millis() - lastPulseTime;
+    if (el < 2000) drawPlayerUI(myPos.x * width, myPos.y * height, el);
 }
 
-// 黑底白边排行榜
+// 排行榜：黑底白描边
 function drawLeaderboard() {
     if (leaderboard.length === 0) return;
     push(); fill(0); stroke(255); strokeWeight(1);
@@ -117,6 +141,14 @@ function drawLeaderboard() {
     pop();
 }
 
+// 侧边 8px 窄条
+function drawDistanceBar(d) {
+    let barW = 8;
+    fill(d < (0.5/REAL_SIZE) ? color(255, 0, 0) : color(255, 180));
+    noStroke();
+    rect(0, height, barW, -map(d, 0, 0.8, height, 0));
+}
+
 function drawRefreshBall() {
     push(); translate(width - 60, height - 60);
     fill(20, 200); stroke(255, 40); circle(0, 0, 80);
@@ -124,14 +156,13 @@ function drawRefreshBall() {
     if (millis() - lastPulseTime < 2000) { rotate(millis() * 0.01); arc(0, 0, 45, 45, 0, PI * 1.5); }
     else { 
         circle(0, 0, 45); 
-        // 调试指示器：只要有任何动作，小点就会变红，方便你观察手机是否感应到了
-        fill(abs(accelerationX) + abs(accelerationY) > 0.5 ? color(255, 0, 0) : color(0, 255, 180));
+        // 调试指示：红色代表感应到震动
+        fill(abs(accelerationX + accelerationY) > 0.3 ? color(255, 0, 0) : color(0, 255, 180));
         circle(0, 0, 10); 
     }
     pop();
 }
 
-// 其余辅助绘图函数
 function drawTimer() { fill(0, 150); rect(width/2 - 50, 15, 100, 35, 8); fill(255); textAlign(CENTER, CENTER); text(`${floor(timeLeft/60)}:${nf(timeLeft%60, 2)}`, width/2, 32); }
 function drawBases() { bases.forEach(b => { push(); translate(b.x*width, b.y*height); fill(b.color.r, b.color.g, b.color.b); stroke(255); rectMode(CENTER); rect(0, 5, 22, 16); triangle(-14, 5, 0, -12, 14, 5); pop(); }); }
 function drawStars() { treasures.forEach(t => { if (t.found) { push(); translate(t.x*width, t.y*height); fill(t.foundBy.r, t.foundBy.g, t.foundBy.b); noStroke(); beginShape(); for(let i=0; i<10; i++){ let r=(i%2==0)?10:5; vertex(r*cos(TWO_PI*i/10), r*sin(TWO_PI*i/10)); } endShape(CLOSE); pop(); } }); }
