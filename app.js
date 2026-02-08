@@ -8,37 +8,36 @@ app.use(express.static("public"));
 let treasures = [];
 let bases = [];
 let gameTime = 300; 
-let playerScores = {};
+let playerScores = {}; 
 
 function initMap() {
+    // 随机 5 颗星星
     treasures = Array.from({length: 5}, () => ({
         x: Math.random(), y: Math.random(), found: false, foundBy: null 
     }));
 }
 initMap();
 
-// 核心倒计时与重置
+// 全局 5 分钟计时
 setInterval(() => {
     if (gameTime > 0) {
         gameTime--;
         io.emit("timer-update", gameTime);
     } else {
-        // 5分钟结束，触发全局强制重置
         gameTime = 300;
         initMap(); 
-        bases = [];
+        bases = []; 
         playerScores = {}; 
-        io.emit("game-reset"); // 发送重置指令给所有客户端
+        io.emit("game-reset"); // 通知所有客户端重置回 gameState 0
     }
 }, 1000);
 
 io.on("connection", (socket) => {
-    playerScores[socket.id] = { color: null, score: 0 };
     socket.emit("init-game", { treasures, bases, gameTime });
 
-    socket.on("set-base", (data) => {
-        playerScores[socket.id] = { color: data.color, score: 0 };
-        bases.push({ id: socket.id, x: data.x, y: data.y, color: data.color });
+    socket.on("set-base", (d) => {
+        playerScores[socket.id] = { color: d.color, score: 0 };
+        bases.push({ id: socket.id, x: d.x, y: d.y, color: d.color });
         io.emit("update-bases", bases);
     });
 
@@ -55,17 +54,15 @@ io.on("connection", (socket) => {
                 if(playerScores[socket.id]) { playerScores[socket.id].score++; scoreChanged = true; }
             }
         });
-        if (scoreChanged) broadcastLeaderboard();
+        if (scoreChanged) {
+            let lb = Object.values(playerScores).filter(p => p.color !== null).sort((a,b)=>b.score-a.score).slice(0,5);
+            io.emit("update-leaderboard", lb);
+        }
         io.emit("update-treasures", treasures);
         io.emit("update-bases", bases);
     });
-
-    socket.on("disconnect", () => { delete playerScores[socket.id]; broadcastLeaderboard(); });
+    
+    socket.on("disconnect", () => { delete playerScores[socket.id]; });
 });
-
-function broadcastLeaderboard() {
-    let lb = Object.values(playerScores).filter(p => p.color !== null).sort((a, b) => b.score - a.score).slice(0, 5);
-    io.emit("update-leaderboard", lb);
-}
 
 server.listen(process.env.PORT || 3000);

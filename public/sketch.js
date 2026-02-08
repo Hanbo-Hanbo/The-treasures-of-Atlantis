@@ -8,13 +8,17 @@ let mapImg;
 let heading = 0;
 let timeLeft = 300;
 
-// 状态控制：0:等待首触, 3:正式游戏
-let gameState = 0; 
+// 状态控制
+let gameState = 0; // 0: 等待首触设置大本营, 3: 正式游戏
 let lastMoveTime = -2000;
 let lastAccel = 0;
-let startTime; // 用于记录提示词显示时间
+let startTime;
+let tipAlpha = 255;
 
-const REAL_SPACE_SIZE = 4.47; // 20平米
+// 空间映射参数 (20平米)
+const REAL_SPACE_SIZE = 4.47; 
+const STEP_THRESHOLD = 2.5; // 使用线性加速度，2.5是非常灵敏的步行阈值
+const STEP_SIZE = 0.05;    // 每步位移比例
 
 function preload() { mapImg = loadImage('map.jpg'); }
 
@@ -22,77 +26,98 @@ function setup() {
     socket = io();
     createCanvas(windowWidth, windowHeight).parent("sketch-container");
     myColor = color(random(255), random(255), random(255));
-    startTime = millis(); // 记录游戏打开时间
+    startTime = millis();
 
+    // 接收服务端数据
     socket.on("init-game", d => { treasures = d.treasures; bases = d.bases; timeLeft = d.gameTime; });
     socket.on("update-treasures", d => treasures = d);
     socket.on("update-bases", d => bases = d);
     socket.on("update-leaderboard", d => leaderboard = d);
     socket.on("timer-update", t => timeLeft = t);
-    
-    // 强制重置：5分钟结束后回到初始状态
     socket.on("game-reset", () => {
         gameState = 0;
         startTime = millis();
-        treasures = [];
-        bases = [];
-        leaderboard = [];
+        treasures = []; bases = []; leaderboard = [];
+        myPos = {x:0.5, y:0.5};
     });
 }
 
+// 核心：点击屏幕即授权并开始
 function mousePressed() {
-    // 第一次点击：请求权限 + 设置大本营
     if (gameState === 0) {
-        if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        // 1. 申请传感器权限 (iOS必须在此时触发)
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
             DeviceOrientationEvent.requestPermission();
-            DeviceMotionEvent.requestPermission();
+            DeviceMotionEvent.requestPermission().then(response => {
+                if (response === 'granted') {
+                    window.addEventListener('devicemotion', handleMotion, true);
+                    window.addEventListener('deviceorientation', (e) => {
+                        heading = e.webkitCompassHeading || e.alpha;
+                    }, true);
+                }
+            });
+        } else {
+            // 非iOS设备直接监听
+            window.addEventListener('devicemotion', handleMotion, true);
+            window.addEventListener('deviceorientation', (e) => {
+                heading = e.webkitCompassHeading || e.alpha;
+            }, true);
         }
-        window.addEventListener('deviceorientation', e => heading = e.webkitCompassHeading || e.alpha, true);
-        window.addEventListener('devicemotion', handleMotion, true);
 
+        // 2. 设置大本营
         myPos.x = mouseX / width;
         myPos.y = mouseY / height;
         socket.emit("set-base", { 
             x: myPos.x, y: myPos.y, 
             color: {r: red(myColor), g: green(myColor), b: blue(myColor)} 
         });
+        
         gameState = 3;
+        startTime = millis(); // 重置计时用于提示词消失
         return;
-    } 
-    
-    // 正式游戏：点击只同步探测脉冲，【不改变位置】
+    }
+
+    // 3. 正式游戏：点击只刷新雷达，不移动
     if (gameState === 3) {
         let d = dist(mouseX, mouseY, width - 60, height - 60);
-        if (d < 45 && (millis() - lastMoveTime > 2000)) {
-            syncOnly(); 
+        if (d < 45 && (millis() - lastMoveTime > 1500)) {
+            syncData(); 
         }
     }
 }
 
+// 加速度计监听
 function handleMotion(event) {
     if (gameState !== 3) return;
-    let acc = event.accelerationIncludingGravity;
-    if (!acc) return;
+    
+    // 使用 acceleration (剔除重力后的线性加速度)
+    let acc = event.acceleration; 
+    if (!acc || acc.x === null) {
+        // 如果 linear acceleration 不可用，退而求其次使用 gravity 过滤
+        acc = event.accelerationIncludingGravity;
+    }
+    
     let currentAccel = sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-    // 物理位移阈值
-    if (abs(currentAccel - lastAccel) > 12.0) {
-        physicalMove(); 
+    let motionDelta = abs(currentAccel - lastAccel);
+
+    // 灵敏度判定
+    if (motionDelta > STEP_THRESHOLD) {
+        doPhysicalMove();
     }
     lastAccel = currentAccel;
 }
 
-// 仅在真实走路时改变坐标
-function physicalMove() {
-    let stepSize = 0.05; 
-    myPos.x += cos(radians(heading - 90)) * stepSize;
-    myPos.y += sin(radians(heading - 90)) * stepSize;
+// 物理行走：改变坐标
+function doPhysicalMove() {
+    myPos.x += cos(radians(heading - 90)) * STEP_SIZE;
+    myPos.y += sin(radians(heading - 90)) * STEP_SIZE;
     myPos.x = constrain(myPos.x, 0, 1);
     myPos.y = constrain(myPos.y, 0, 1);
-    syncOnly();
+    syncData();
 }
 
-// 统一同步与脉冲展示
-function syncOnly() {
+// 数据同步：不改变坐标
+function syncData() {
     lastMoveTime = millis();
     socket.emit("refresh-location", { 
         xpos: myPos.x, ypos: myPos.y, 
@@ -103,21 +128,21 @@ function syncOnly() {
 function draw() {
     image(mapImg, 0, 0, width, height);
     
-    // 5秒提示词逻辑
-    let timeElapsed = millis() - startTime;
-    if (gameState === 0) {
-        drawOverlay("TAP ANYWHERE ON THE MAP\nTO SET YOUR BASE AND START");
-    } else if (timeElapsed < 5000) {
-        // 游戏已开始但未满5秒，继续显示简短提示或状态
-        drawMiniOverlay("BASE DEPLOYED - GOOD LUCK!");
-    }
+    let timeSinceAction = millis() - startTime;
 
-    if (gameState === 3) {
-        runGameLogic();
+    if (gameState === 0) {
+        drawOverlay("TAP ANYWHERE ON THE MAP\nTO SET BASE AND START");
+    } else {
+        runGameSession();
+        // 5秒提示词逐渐消失逻辑
+        if (timeSinceAction < 5000) {
+            tipAlpha = map(timeSinceAction, 4000, 5000, 255, 0);
+            drawFadingTip("BASE DEPLOYED - GOOD LUCK!", tipAlpha);
+        }
     }
 }
 
-function runGameLogic() {
+function runGameSession() {
     let minDist = 1.0;
     treasures.filter(t => !t.found).forEach(t => {
         let d = dist(myPos.x, myPos.y, t.x, t.y);
@@ -135,7 +160,7 @@ function runGameLogic() {
     if (elapsed < 2000) drawPlayerUI(myPos.x * width, myPos.y * height, elapsed);
 }
 
-// 侧边 8px 极窄条，不闪烁
+// 侧边 8px 极窄条
 function drawDistanceBar(d) {
     let barW = 8;
     let threshold = 0.5 / REAL_SPACE_SIZE;
@@ -145,12 +170,13 @@ function drawDistanceBar(d) {
     rect(0, height, barW, -h);
 }
 
+// 排行榜：黑底、白描边、白字
 function drawLeaderboard() {
     if (leaderboard.length === 0) return;
-    let x = 20; let y = 65;
-    let w = 150; let h = leaderboard.length * 25 + 10;
+    let x = 20, y = 65, w = 150;
+    let h = leaderboard.length * 25 + 10;
     push();
-    fill(0); stroke(255); strokeWeight(1.5);
+    fill(0); stroke(255); strokeWeight(1);
     rect(x, y, w, h, 5);
     noStroke(); fill(255); textAlign(LEFT, TOP); textSize(13);
     for (let i = 0; i < leaderboard.length; i++) {
@@ -217,7 +243,9 @@ function drawOverlay(txt) {
     fill(255); textAlign(CENTER, CENTER); textSize(16); text(txt, width/2, height/2);
 }
 
-function drawMiniOverlay(txt) {
-    fill(0, 150); rect(0, height - 100, width, 40);
-    fill(255); textAlign(CENTER, CENTER); textSize(14); text(txt, width/2, height - 80);
+function drawFadingTip(txt, a) {
+    fill(0, a * 0.6); noStroke();
+    rect(0, height - 100, width, 50);
+    fill(255, a); textAlign(CENTER, CENTER);
+    text(txt, width/2, height - 75);
 }
