@@ -8,7 +8,7 @@ app.use(express.static("public"));
 let treasures = [];
 let bases = [];
 let gameTime = 300; 
-let playerScores = {}; 
+let players = {}; // 存储所有玩家数据: { id: { x, y, color, score } }
 
 function initMap() {
     treasures = Array.from({length: 5}, () => ({
@@ -25,44 +25,68 @@ setInterval(() => {
         gameTime = 300;
         initMap(); 
         bases = [];
-        playerScores = {}; 
-        io.emit("game-reset"); // 5分钟到，强制所有人回到设置大本营状态
+        // 重置所有玩家分数但保留位置
+        for (let id in players) { players[id].score = 0; }
+        io.emit("game-reset");
     }
 }, 1000);
 
 io.on("connection", (socket) => {
-    playerScores[socket.id] = { color: null, score: 0 };
+    // 初始化新玩家
+    players[socket.id] = { x: 0.5, y: 0.5, color: null, score: 0 };
+    
     socket.emit("init-game", { treasures, bases, gameTime });
 
-    socket.on("set-base", (d) => {
-        playerScores[socket.id] = { color: d.color, score: 0 };
-        bases.push({ id: socket.id, x: d.x, y: d.y, color: d.color });
+    socket.on("set-base", (data) => {
+        if(players[socket.id]) {
+            players[socket.id].x = data.x;
+            players[socket.id].y = data.y;
+            players[socket.id].color = data.color;
+        }
+        bases.push({ id: socket.id, x: data.x, y: data.y, color: data.color });
+        io.emit("update-players", players);
         io.emit("update-bases", bases);
     });
 
     socket.on("refresh-location", (data) => {
-        // 占领大本营检测
+        if(!players[socket.id]) return;
+
+        // 更新玩家位置
+        players[socket.id].x = data.xpos;
+        players[socket.id].y = data.ypos;
+
+        // 占领大本营逻辑
         bases.forEach(b => {
             if (b.id !== socket.id && Math.hypot(data.xpos - b.x, data.ypos - b.y) < 0.1) {
                 b.color = data.color;
             }
         });
-        // 寻宝检测
+
+        // 发现星星逻辑
         let scoreChanged = false;
         treasures.forEach(t => {
             if (!t.found && Math.hypot(data.xpos - t.x, data.ypos - t.y) < 0.08) {
-                t.found = true; t.foundBy = data.color;
-                if(playerScores[socket.id]) { playerScores[socket.id].score++; scoreChanged = true; }
+                t.found = true; 
+                t.foundBy = data.color;
+                players[socket.id].score++;
+                scoreChanged = true;
             }
         });
+
+        // 广播所有玩家最新状态
+        io.emit("update-players", players);
         if (scoreChanged) {
-            let lb = Object.values(playerScores).filter(p => p.color !== null).sort((a,b)=>b.score-a.score).slice(0,5);
+            let lb = Object.values(players).filter(p => p.color !== null).sort((a,b)=>b.score-a.score).slice(0,5);
             io.emit("update-leaderboard", lb);
+            io.emit("update-treasures", treasures);
         }
-        io.emit("update-treasures", treasures);
         io.emit("update-bases", bases);
     });
-    socket.on("disconnect", () => { delete playerScores[socket.id]; });
+
+    socket.on("disconnect", () => {
+        delete players[socket.id];
+        io.emit("update-players", players);
+    });
 });
 
 server.listen(process.env.PORT || 3000);
