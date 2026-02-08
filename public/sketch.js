@@ -2,10 +2,10 @@ let socket, myPos = { x: 0.5, y: 0.5 }, treasures = [], bases = [], leaderboard 
 let myColor, mapImg, heading = 0, timeLeft = 300;
 let gameState = 0, lastPulseTime = -2000, lastAccel = 0, startTime;
 
-// --- 调优参数 ---
+// --- Tuning Parameters ---
 const REAL_SIZE = 4.47; 
-const STEP_THRES = 1.0; 
-const STEP_VAL = 0.03;
+const STEP_THRES = 5.0; // Lowered sensitivity (increased threshold from 1.0 to 5.0)
+const STEP_VAL = 0.03;  // Movement step size
 
 function preload() { 
     mapImg = loadImage('map.jpg'); 
@@ -17,7 +17,7 @@ function setup() {
     myColor = color(random(255), random(255), random(255));
     startTime = millis();
 
-    // 监听数据，确保数据始终是数组，防止 forEach 报错
+    // Data listeners with safety checks
     socket.on("init-game", d => { treasures = d.treasures || []; bases = d.bases || []; timeLeft = d.gameTime || 300; });
     socket.on("update-treasures", d => { treasures = d || []; });
     socket.on("update-bases", d => { bases = d || []; });
@@ -32,9 +32,9 @@ function setup() {
 }
 
 function mousePressed() {
-    // 状态 0: 必须先完成权限和位置初始化
+    // Stage 0: Handle permissions and base setup
     if (gameState === 0) {
-        // 强制申请权限
+        // Request sensor permissions for iOS
         if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
             DeviceOrientationEvent.requestPermission()
                 .then(oState => {
@@ -50,12 +50,12 @@ function mousePressed() {
                 })
                 .catch(e => console.error("Permission denied: ", e));
         } else {
-            // 非 iOS 或 PC 端测试
+            // Android or PC testing
             window.addEventListener('devicemotion', handleMotion, true);
             window.addEventListener('deviceorientation', e => { heading = e.webkitCompassHeading || e.alpha; });
         }
 
-        // 绑定大本营
+        // Set initial home base location
         myPos.x = mouseX / width;
         myPos.y = mouseY / height;
         socket.emit("set-base", { x: myPos.x, y: myPos.y, color: {r: red(myColor), g: green(myColor), b: blue(myColor)} });
@@ -66,7 +66,7 @@ function mousePressed() {
         return false;
     }
 
-    // 状态 3: 手动刷新雷达
+    // Stage 3: Manual radar refresh
     if (gameState === 3) {
         let d = dist(mouseX, mouseY, width - 60, height - 60);
         if (d < 45 && (millis() - lastPulseTime > 1000)) {
@@ -82,9 +82,11 @@ function handleMotion(e) {
     let acc = e.accelerationIncludingGravity;
     if (!acc) return;
     
+    // Calculate magnitude of acceleration
     let current = sqrt(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
     let delta = abs(current - lastAccel);
 
+    // Trigger movement only if delta exceeds threshold
     if (delta > STEP_THRES) {
         myPos.x += cos(radians(heading - 90)) * STEP_VAL;
         myPos.y += sin(radians(heading - 90)) * STEP_VAL;
@@ -100,19 +102,19 @@ function sync() {
 }
 
 function draw() {
-    background(0); // 兜底背景
+    background(0); // Fallback background
     image(mapImg, 0, 0, width, height);
     
     if (gameState === 0) {
-        drawOverlay("TAP ANYWHERE TO START\n(Please use Safari on iOS)");
+        drawOverlay("TAP ANYWHERE TO START"); // Simplified text
     } else {
         runGameSession();
-        // 5秒提示逻辑
+        // 5-second tip fade logic
         let ts = millis() - startTime;
         if (ts < 5000) drawFadingTip("BASE DEPLOYED!", map(ts, 4000, 5000, 255, 0));
     }
 
-    // 调试信息（如果屏幕还是没 UI，看这里有没有文字）
+    // Debug Status bar
     fill(255, 100);
     noStroke();
     textSize(10);
@@ -121,7 +123,6 @@ function draw() {
 }
 
 function runGameSession() {
-    // 增加数据存在性检查
     let minDist = 1.0;
     if (treasures && treasures.length > 0) {
         treasures.filter(t => !t.found).forEach(t => {
@@ -141,7 +142,7 @@ function runGameSession() {
     if (el < 2000) drawPlayerUI(myPos.x * width, myPos.y * height, el);
 }
 
-// UI 绘制组件
+// Distance bar: 8px wide
 function drawDistanceBar(d) {
     let barW = 8;
     fill(d < (0.5/REAL_SIZE) ? color(255, 0, 0) : color(255, 180));
@@ -149,6 +150,7 @@ function drawDistanceBar(d) {
     rect(0, height, barW, -map(d, 0, 0.8, height, 0));
 }
 
+// Leaderboard: Black bg, White border
 function drawLeaderboard() {
     if (!leaderboard || leaderboard.length === 0) return;
     push(); fill(0, 180); stroke(255); strokeWeight(1);
